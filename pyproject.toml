@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llmseo-tool"
+version = "0.1.0"
+description = "Audit a website for LLM discoverability, generate llm.txt, and recommendations."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Codex CLI" }]
+dependencies = [
+  "requests>=2.31.0",
+  "beautifulsoup4>=4.12.2",
+  "Flask>=3.0.0"
+]
+
+[project.scripts]
+llm-seo = "llmseo.cli:main"
+llm-seo-web = "llmseo.web:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
