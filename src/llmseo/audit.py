@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import requests
 
 from .utils import normalize_url, extract_visible_text, word_stats, flesch_reading_ease, to_absolute, is_same_origin, clamp
+
+
+@dataclass
+class TopicInsight:
+    topic: str
+    score: float
 
 
 @dataclass
@@ -27,6 +34,7 @@ class PageAudit:
     meta_robots: Optional[str]
     blocked_by_robots: bool
     semantic_tags_present: List[str]
+    topics: List[TopicInsight] = field(default_factory=list)
 
 
 @dataclass
@@ -124,6 +132,141 @@ def detect_semantic_tags(html: str) -> List[str]:
     return present
 
 
+STOPWORDS = {
+    "a",
+    "about",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "has",
+    "have",
+    "in",
+    "is",
+    "it",
+    "its",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "their",
+    "this",
+    "to",
+    "was",
+    "were",
+    "with",
+    "your",
+    "you",
+    "we",
+    "our",
+    "they",
+    "will",
+    "can",
+    "not",
+    "but",
+    "if",
+    "so",
+    "than",
+    "then",
+    "when",
+    "what",
+    "which",
+    "who",
+    "how",
+}
+
+
+WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9']+")
+
+
+def _tokenize(text: str) -> List[str]:
+    tokens = [tok.lower() for tok in WORD_RE.findall(text.lower())]
+    return [t for t in tokens if t not in STOPWORDS and len(t) > 2]
+
+
+def _normalize_phrase(text: str) -> Tuple[List[str], str]:
+    cleaned = re.sub(r"\s+", " ", text).strip()
+    tokens = _tokenize(cleaned)
+    return tokens, cleaned
+
+
+def infer_topics(
+    body_text: str,
+    headings: Dict[str, List[str]],
+    title: Optional[str] = None,
+    max_topics: int = 5,
+) -> List[TopicInsight]:
+    tokens = _tokenize(body_text)
+    token_counts = Counter(tokens)
+    if not token_counts:
+        return []
+
+    max_freq = token_counts.most_common(1)[0][1]
+    topics: Dict[str, Tuple[str, float]] = {}
+
+    def add_topic(token_key: Tuple[str, ...], label: str, score: float) -> None:
+        if not token_key:
+            return
+        key = " ".join(token_key)
+        label = label.strip() or key.title()
+        score = clamp(score, 0.0, 100.0)
+        existing = topics.get(key)
+        if not existing or score > existing[1]:
+            topics[key] = (label, score)
+
+    def score_tokens(token_key: Tuple[str, ...], weight: float, bonus: float) -> float:
+        strength = sum(token_counts.get(tok, 0) for tok in token_key)
+        if strength == 0:
+            strength = 0.5 * len(token_key)
+        scaled = (strength / max_freq) * 60.0 * weight
+        return scaled + bonus
+
+    heading_weights = {"title": (1.35, 28.0), "h1": (1.25, 24.0), "h2": (1.1, 18.0), "h3": (1.0, 12.0)}
+
+    if title:
+        t_tokens, cleaned_title = _normalize_phrase(title)
+        if t_tokens:
+            add_topic(
+                tuple(t_tokens),
+                cleaned_title,
+                score_tokens(tuple(t_tokens), *heading_weights["title"]),
+            )
+
+    for level in ["h1", "h2", "h3"]:
+        weight, bonus = heading_weights[level]
+        for h_text in headings.get(level, []):
+            h_tokens, cleaned_heading = _normalize_phrase(h_text)
+            if h_tokens:
+                add_topic(
+                    tuple(h_tokens),
+                    cleaned_heading,
+                    score_tokens(tuple(h_tokens), weight, bonus),
+                )
+
+    for word, freq in token_counts.most_common(max_topics * 2):
+        key = (word,)
+        if " ".join(key) in topics:
+            continue
+        score = (freq / max_freq) * 70.0
+        add_topic(key, word.title(), score)
+        if len(topics) >= max_topics:
+            break
+
+    sorted_topics = sorted(
+        (TopicInsight(topic=label, score=round(score, 1)) for label, score in topics.values()),
+        key=lambda t: t.score,
+        reverse=True,
+    )
+
+    return sorted_topics[:max_topics]
+
+
 def parse_robots(robots_txt: str) -> Dict[str, List[str]]:
     sitemaps = []
     disallow = []
@@ -179,6 +322,7 @@ def audit_url(url: str) -> SiteAudit:
     reading_ease = flesch_reading_ease(stats["word_count"], stats["sentence_count"], stats["syllables"])
     meta_robots = metas.get("name:robots")
     semantic_tags_present = detect_semantic_tags(html)
+    topics = infer_topics(text, headings, title=title)
 
     # robots.txt
     from urllib.parse import urlparse
@@ -229,6 +373,7 @@ def audit_url(url: str) -> SiteAudit:
         meta_robots=meta_robots,
         blocked_by_robots=blocked,
         semantic_tags_present=semantic_tags_present,
+        topics=topics,
     )
     site.page = page
 
