@@ -15,6 +15,8 @@
   - `llm-seo https://example.com --save-llm-txt --out-dir ./out`
 - JSON output (for pipelines):
   - `llm-seo https://example.com --json > report.json`
+- Include a search phrase for copy suggestions:
+  - `llm-seo https://example.com --target-query "best crm for startups"`
 
 **Web UI**
 - Launch the local UI:
