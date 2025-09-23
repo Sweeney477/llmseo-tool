@@ -7,7 +7,7 @@ from typing import Any, Dict
 
 from flask import Flask, jsonify, request, Response
 
-from .audit import audit_url
+from .audit import audit_url, query_insights_to_dict
 from .llm_txt import generate_llm_txt
 
 
@@ -32,7 +32,7 @@ def create_app() -> Flask:
                 header h1 { margin: 0; font-size: 16px; letter-spacing: 0.3px; }
                 main { max-width: 1100px; margin: 0 auto; padding: 24px; }
                 .row { display:flex; gap:16px; align-items:flex-end; flex-wrap:wrap; }
-                input[type=url] { flex: 1; padding: 12px 12px; border-radius: 8px; border:1px solid #2a2d31; background: #0f1114; color: var(--fg); }
+                input[type=url], input[type=text] { flex: 1; padding: 12px 12px; border-radius: 8px; border:1px solid #2a2d31; background: #0f1114; color: var(--fg); }
                 button { padding: 10px 14px; border-radius: 8px; border:1px solid #2a2d31; background: var(--acc); color: #fff; cursor: pointer; font-weight:600; }
                 button.secondary { background:#1d2025; color:var(--fg); }
                 .grid { display:grid; grid-template-columns: 1fr 1fr; gap:16px; }
@@ -56,6 +56,7 @@ def create_app() -> Flask:
               <main>
                 <div class="row">
                   <input id="url" type="url" placeholder="https://example.com" />
+                  <input id="query" type="text" placeholder="Target search phrase (optional)" />
                   <button id="audit">Run Audit</button>
                 </div>
                 <div id="status" class="muted" style="margin-top:10px;"></div>
@@ -87,22 +88,47 @@ def create_app() -> Flask:
                     <pre id="llmtxt"># run an audit to generate</pre>
                   </div>
                 </div>
+
+                <div class="card" id="query-card" style="margin-top:16px;">
+                  <div class="muted small">Query Alignment</div>
+                  <div id="query-summary" class="muted small">Enter a target search phrase to see copy recommendations.</div>
+                  <div id="query-match" class="small" style="margin-top:8px;"></div>
+                  <div id="query-terms" class="small muted" style="margin-top:4px;"></div>
+                  <ul id="query-recs"></ul>
+                </div>
               </main>
               <script>
               const $ = (id)=>document.getElementById(id);
               const fmt = (v)=> v===null||v===undefined||v===""?"(missing)":v;
               const pill = (k,v)=>`<span class="pill">${k}: <b>${v}</b></span>`;
+              const defaultQueryMsg = "Enter a target search phrase to see copy recommendations.";
+
+              function resetQueryCard(message = defaultQueryMsg) {
+                $("query-summary").textContent = message;
+                $("query-match").textContent = "";
+                $("query-terms").textContent = "";
+                $("query-recs").innerHTML = "";
+              }
 
               async function runAudit() {
                 const url = $("url").value.trim();
+                const targetQuery = $("query").value.trim();
                 if (!url) { $("status").textContent = "Please enter a URL"; return; }
                 $("status").textContent = "Auditing…";
                 $("audit").disabled = true;
+                if (targetQuery) {
+                  $("query-summary").textContent = "Analyzing query alignment…";
+                  $("query-match").textContent = "";
+                  $("query-terms").textContent = "";
+                  $("query-recs").innerHTML = "";
+                } else {
+                  resetQueryCard();
+                }
                 try {
                   const res = await fetch('/api/audit', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ url })
+                    body: JSON.stringify({ url, target_query: targetQuery || null })
                   });
                   if (!res.ok) throw new Error('Request failed');
                   const data = await res.json();
@@ -131,6 +157,29 @@ def create_app() -> Flask:
                   $("facts").innerHTML = facts.map(([k,v])=>`<div class="muted">${k}</div><div>${v}</div>`).join('');
                   // llm.txt
                   $("llmtxt").textContent = data.llm_txt_draft || '# none';
+                  const qi = data.query_insights;
+                  if (qi) {
+                    $("query-summary").textContent = `Target query: "${qi.query}"`;
+                    const match = qi.match_score != null ? `${qi.match_score}%` : 'n/a';
+                    const phraseNote = qi.phrase_present ? 'phrase present in copy' : 'phrase missing';
+                    $("query-match").textContent = `Match score: ${match} (${phraseNote})`;
+                    const bits = [];
+                    if (qi.present_terms && qi.present_terms.length) {
+                      bits.push(`Covered: ${qi.present_terms.join(', ')}`);
+                    }
+                    if (qi.missing_terms && qi.missing_terms.length) {
+                      bits.push(`Missing: ${qi.missing_terms.join(', ')}`);
+                    }
+                    $("query-terms").textContent = bits.join(' • ');
+                    $("query-recs").innerHTML = (qi.recommendations||[]).map(r=>`<li>${r}</li>`).join('');
+                  } else if (targetQuery) {
+                    $("query-summary").textContent = `No query insights generated for "${targetQuery}".`;
+                    $("query-match").textContent = '';
+                    $("query-terms").textContent = '';
+                    $("query-recs").innerHTML = '';
+                  } else {
+                    resetQueryCard();
+                  }
                   $("status").textContent = "Done";
                 } catch (e) {
                   console.error(e);
@@ -158,6 +207,7 @@ def create_app() -> Flask:
               $("audit").addEventListener('click', runAudit);
               $("copy").addEventListener('click', copyTxt);
               $("download").addEventListener('click', downloadTxt);
+              resetQueryCard();
               </script>
             </body>
             </html>
@@ -172,7 +222,8 @@ def create_app() -> Flask:
             url = str(payload.get("url", "")).strip()
             if not url:
                 return jsonify({"error": "Missing 'url'"}), 400
-            site = audit_url(url)
+            target_query = str(payload.get("target_query", "") or "").strip()
+            site = audit_url(url, target_query=target_query)
             llm_txt = generate_llm_txt(site.base_url, sitemaps=site.sitemaps)
             data = {
                 "score": site.score,
@@ -195,6 +246,7 @@ def create_app() -> Flask:
                 "llm_txt_url": site.llm_txt_url,
                 "sitemaps": site.sitemaps,
                 "llm_txt_draft": llm_txt,
+                "query_insights": query_insights_to_dict(site.query_insights),
             }
             return jsonify(data)
         except Exception as e:

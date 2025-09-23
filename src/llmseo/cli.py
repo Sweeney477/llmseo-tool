@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from .audit import audit_url
+from .audit import audit_url, query_insights_to_dict
 from .llm_txt import generate_llm_txt
 
 
@@ -18,9 +18,14 @@ def main(argv=None):
     parser.add_argument("--save-llm-txt", action="store_true", help="Write generated llm.txt to output directory")
     parser.add_argument("--out-dir", default=".", help="Directory to write outputs (default: current directory)")
     parser.add_argument("--json", dest="as_json", action="store_true", help="Output JSON report to stdout")
+    parser.add_argument(
+        "--target-query",
+        dest="target_query",
+        help="Search phrase you want the page to answer in LLM responses (optional)",
+    )
     args = parser.parse_args(argv)
 
-    site = audit_url(args.url)
+    site = audit_url(args.url, target_query=args.target_query)
 
     # Generate llm.txt draft
     llm_txt = generate_llm_txt(site.base_url, sitemaps=site.sitemaps)
@@ -54,6 +59,7 @@ def main(argv=None):
                     "llm_txt_url": site.llm_txt_url,
                     "sitemaps": site.sitemaps,
                     "llm_txt_draft": llm_txt,
+                    "query_insights": query_insights_to_dict(site.query_insights),
                 },
                 indent=2,
             )
@@ -87,6 +93,20 @@ def main(argv=None):
         print("\nRecommendations:")
         for r in site.recommendations:
             print(f"  - {r}")
+
+    if site.query_insights:
+        qi = site.query_insights
+        print("\nQuery Alignment:")
+        print(f"  - Target query: {qi.query or '(unspecified)'}")
+        print(f"  - Match score: {qi.match_score:.1f}%")
+        if qi.present_terms:
+            print(f"  - Terms covered: {', '.join(qi.present_terms)}")
+        if qi.missing_terms:
+            print(f"  - Terms missing: {', '.join(qi.missing_terms)}")
+        if qi.recommendations:
+            print("  - Query-specific recommendations:")
+            for rec in qi.recommendations:
+                print(f"      * {rec}")
 
     print("\nGenerated llm.txt (preview):\n")
     print(llm_txt)

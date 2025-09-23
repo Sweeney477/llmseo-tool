@@ -30,6 +30,20 @@ class PageAudit:
 
 
 @dataclass
+class QueryInsights:
+    query: str
+    terms_analyzed: List[str]
+    present_terms: List[str]
+    missing_terms: List[str]
+    heading_terms_present: List[str]
+    heading_terms_missing: List[str]
+    phrase_present: bool
+    match_score: float
+    question_intent: bool
+    recommendations: List[str]
+
+
+@dataclass
 class SiteAudit:
     base_url: str
     robots_txt: Optional[str]
@@ -41,9 +55,98 @@ class SiteAudit:
     score: float = 0.0
     breakdown: Dict[str, float] = field(default_factory=dict)
     recommendations: List[str] = field(default_factory=list)
+    query_insights: Optional[QueryInsights] = None
 
 
 UA = "llmseo-tool/0.1 (+https://example.com)"
+
+
+STOPWORDS = {
+    "the",
+    "a",
+    "an",
+    "for",
+    "to",
+    "and",
+    "or",
+    "of",
+    "in",
+    "on",
+    "at",
+    "by",
+    "from",
+    "into",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "as",
+    "that",
+    "this",
+    "these",
+    "those",
+    "it",
+    "its",
+    "your",
+    "my",
+    "our",
+    "their",
+    "about",
+    "with",
+    "without",
+    "vs",
+    "versus",
+    "how",
+    "what",
+    "why",
+    "when",
+    "where",
+    "who",
+    "which",
+    "can",
+    "do",
+    "does",
+    "did",
+    "will",
+    "would",
+    "should",
+    "could",
+    "may",
+    "might",
+    "if",
+    "i",
+    "we",
+    "you",
+    "they",
+    "them",
+    "us",
+    "me",
+}
+
+SHORT_TERM_ALLOW = {"ai", "ml", "vr", "ar", "ui", "ux"}
+
+QUESTION_PREFIXES = {
+    "how",
+    "what",
+    "why",
+    "when",
+    "where",
+    "who",
+    "which",
+    "can",
+    "do",
+    "does",
+    "did",
+    "will",
+    "would",
+    "should",
+    "could",
+    "may",
+    "might",
+    "is",
+    "are",
+}
 
 
 def fetch(url: str, timeout: int = 15) -> Tuple[int, str, Dict[str, str]]:
@@ -124,6 +227,90 @@ def detect_semantic_tags(html: str) -> List[str]:
     return present
 
 
+def normalize_query_terms(query: str) -> List[str]:
+    words = re.findall(r"[a-z0-9]+", query.lower())
+    terms: List[str] = []
+    for w in words:
+        if (len(w) <= 2 and w not in SHORT_TERM_ALLOW) or w in STOPWORDS:
+            continue
+        if w not in terms:
+            terms.append(w)
+    return terms
+
+
+def analyze_query_alignment(query: str, body_text: str, page: PageAudit) -> QueryInsights:
+    query = query.strip()
+    terms = normalize_query_terms(query)
+    body_lower = body_text.lower()
+    headings_text = " ".join(page.headings.get("h1", []) + page.headings.get("h2", []) + page.headings.get("h3", [])).lower()
+    phrase_present = query.lower() in body_lower if query else False
+    present_terms = [t for t in terms if re.search(fr"\b{re.escape(t)}\b", body_lower)]
+    missing_terms = [t for t in terms if t not in present_terms]
+    heading_terms_present = [t for t in terms if re.search(fr"\b{re.escape(t)}\b", headings_text)]
+    heading_terms_missing = [t for t in terms if t not in heading_terms_present]
+    question_marker = any(
+        re.search(fr"\b{re.escape(word)}\b", headings_text) for word in QUESTION_PREFIXES
+    )
+
+    raw_lower = query.lower()
+    question_intent = raw_lower.endswith("?") or any(raw_lower.startswith(prefix + " ") for prefix in QUESTION_PREFIXES)
+
+    match_score = 0.0
+    if terms:
+        match_score = round((len(present_terms) / len(terms)) * 100, 1)
+    elif phrase_present:
+        match_score = 100.0
+
+    recs: List[str] = []
+    if not terms and not phrase_present:
+        recs.append("Provide a more specific search phrase to analyze alignment.")
+    if missing_terms:
+        sample = ", ".join(missing_terms[:5])
+        recs.append(f"Add copy that naturally includes: {sample}.")
+    if heading_terms_missing:
+        section_sample = ", ".join(heading_terms_missing[:3])
+        recs.append(f"Introduce H2/H3 sections focusing on {section_sample}.")
+    if query and not phrase_present:
+        recs.append(f'Use the exact phrase "{query}" in a prominent section (intro, summary, or FAQ).')
+    if question_intent and not re.search(r"\?", headings_text) and not question_marker:
+        recs.append("Add a direct Q&A or FAQ entry that answers the question explicitly.")
+    if match_score < 50 and (terms or phrase_present):
+        recs.append("Create a dedicated section that fully answers the search intent with supporting details and examples.")
+
+    if not recs and query:
+        recs.append("Reinforce the query topic with a concise summary or FAQ answer to signal relevance to LLMs.")
+
+    return QueryInsights(
+        query=query,
+        terms_analyzed=terms,
+        present_terms=present_terms,
+        missing_terms=missing_terms,
+        heading_terms_present=heading_terms_present,
+        heading_terms_missing=heading_terms_missing,
+        phrase_present=phrase_present,
+        match_score=match_score,
+        question_intent=question_intent,
+        recommendations=recs,
+    )
+
+
+def query_insights_to_dict(insights: Optional[QueryInsights]) -> Optional[Dict[str, object]]:
+    if not insights:
+        return None
+    return {
+        "query": insights.query,
+        "terms_analyzed": insights.terms_analyzed,
+        "present_terms": insights.present_terms,
+        "missing_terms": insights.missing_terms,
+        "heading_terms_present": insights.heading_terms_present,
+        "heading_terms_missing": insights.heading_terms_missing,
+        "phrase_present": insights.phrase_present,
+        "match_score": insights.match_score,
+        "question_intent": insights.question_intent,
+        "recommendations": insights.recommendations,
+    }
+
+
 def parse_robots(robots_txt: str) -> Dict[str, List[str]]:
     sitemaps = []
     disallow = []
@@ -155,8 +342,9 @@ def check_blocked(disallow_paths: List[str], url: str) -> bool:
     return False
 
 
-def audit_url(url: str) -> SiteAudit:
+def audit_url(url: str, target_query: Optional[str] = None) -> SiteAudit:
     url = normalize_url(url)
+    target_query = (target_query or "").strip() or None
     site = SiteAudit(base_url=url, robots_txt=None)
 
     # Fetch main page
@@ -231,6 +419,9 @@ def audit_url(url: str) -> SiteAudit:
         semantic_tags_present=semantic_tags_present,
     )
     site.page = page
+
+    if target_query:
+        site.query_insights = analyze_query_alignment(target_query, text, page)
 
     score_site(site)
     derive_recommendations(site)
