@@ -49,6 +49,10 @@ def main(argv=None):
                         "reading_ease": site.page.reading_ease if site.page else None,
                         "word_count": site.page.text_stats["word_count"] if site.page else None,
                         "has_faq_schema": site.page.has_faq_schema if site.page else None,
+                        "topics": [
+                            {"topic": t.topic, "score": t.score}
+                            for t in (site.page.topics if site.page else [])
+                        ],
                     },
                     "llm_txt_found": site.llm_txt_found,
                     "llm_txt_url": site.llm_txt_url,
@@ -82,6 +86,10 @@ def main(argv=None):
         print(f"  - Robots blocked: {'yes' if p.blocked_by_robots else 'no'}")
         print(f"  - Sitemap(s): {', '.join(site.sitemaps) if site.sitemaps else '(none found)'}")
         print(f"  - LLM policy present: {'yes' if site.llm_txt_found else 'no'}")
+        if p.topics:
+            print("\nLikely LLM topics and quality:")
+            for t in p.topics:
+                print(f"  - {t.topic} (quality {t.score:.0f}/100)")
 
     if site.recommendations:
         print("\nRecommendations:")

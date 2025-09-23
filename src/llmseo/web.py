@@ -86,6 +86,10 @@ def create_app() -> Flask:
                     </div>
                     <pre id="llmtxt"># run an audit to generate</pre>
                   </div>
+                  <div class="card" style="grid-column: span 2;">
+                    <div class="muted small">Likely LLM topics</div>
+                    <div id="topics" class="flex small"></div>
+                  </div>
                 </div>
               </main>
               <script>
@@ -129,6 +133,10 @@ def create_app() -> Flask:
                     ['LLM policy present', data.llm_txt_found? 'yes':'no']
                   ];
                   $("facts").innerHTML = facts.map(([k,v])=>`<div class="muted">${k}</div><div>${v}</div>`).join('');
+                  const topics = p.topics || [];
+                  $("topics").innerHTML = topics.length
+                    ? topics.map(t=>pill(t.topic, `${Math.round(t.score)}/100`)).join('')
+                    : "<span class='muted'>No strong topics detected</span>";
                   // llm.txt
                   $("llmtxt").textContent = data.llm_txt_draft || '# none';
                   $("status").textContent = "Done";
@@ -190,6 +198,10 @@ def create_app() -> Flask:
                     "word_count": site.page.text_stats["word_count"] if site.page else None,
                     "has_faq_schema": site.page.has_faq_schema if site.page else None,
                     "blocked_by_robots": site.page.blocked_by_robots if site.page else None,
+                    "topics": [
+                        {"topic": t.topic, "score": t.score}
+                        for t in (site.page.topics if site.page else [])
+                    ],
                 },
                 "llm_txt_found": site.llm_txt_found,
                 "llm_txt_url": site.llm_txt_url,
