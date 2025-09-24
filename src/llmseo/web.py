@@ -139,7 +139,75 @@ def create_app() -> Flask:
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ url, max_pages: maxPages })
                   });
-                  if (!res.ok) throw new Error('Request failed');
+                  if (!res.ok) {
+                    let errorText = `Request failed with status ${res.status}`;
+                    let rawBody = '';
+                    try {
+                      rawBody = await res.text();
+                    } catch (bodyError) {
+                      console.error('Failed to read error response', bodyError);
+                    }
+                    const contentType = res.headers.get('content-type') || '';
+                    if (rawBody) {
+                      if (contentType.includes('application/json')) {
+                        try {
+                          const errorPayload = JSON.parse(rawBody);
+                          if (errorPayload !== undefined && errorPayload !== null) {
+                            const messageCandidates = [];
+                            if (typeof errorPayload === 'string') {
+                              messageCandidates.push(errorPayload);
+                            }
+                            if (Array.isArray(errorPayload)) {
+                              errorPayload
+                                .filter((item) => typeof item === 'string')
+                                .forEach((item) => messageCandidates.push(item));
+                            }
+                            if (errorPayload && typeof errorPayload === 'object') {
+                              ['error', 'message', 'detail'].forEach((key) => {
+                                const value = errorPayload[key];
+                                if (typeof value === 'string') {
+                                  messageCandidates.push(value);
+                                } else if (Array.isArray(value)) {
+                                  value
+                                    .filter((item) => typeof item === 'string')
+                                    .forEach((item) => messageCandidates.push(item));
+                                } else if (value && typeof value === 'object' && typeof value.message === 'string') {
+                                  messageCandidates.push(value.message);
+                                }
+                              });
+                            }
+                            const messageFromPayload = messageCandidates
+                              .map((msg) => msg.trim())
+                              .find(Boolean);
+                            if (messageFromPayload) {
+                              errorText = messageFromPayload;
+                            } else if (errorPayload && typeof errorPayload === 'object') {
+                              const serialized = JSON.stringify(errorPayload);
+                              if (serialized && serialized !== '{}') {
+                                errorText = serialized;
+                              }
+                            }
+                          }
+                        } catch (jsonError) {
+                          console.error('Failed to parse error response', jsonError);
+                          const trimmedBody = rawBody.trim();
+                          if (trimmedBody) {
+                            errorText = trimmedBody;
+                          }
+                        }
+                      } else {
+                        const trimmedBody = rawBody.trim();
+                        if (trimmedBody) {
+                          errorText = trimmedBody;
+                        }
+                      }
+                    }
+                    if ((!rawBody || !rawBody.trim()) && res.statusText) {
+                      errorText = `Request failed with status ${res.status} (${res.statusText})`;
+                    }
+                    $("status").textContent = errorText;
+                    throw new Error(errorText);
+                  }
                   const data = await res.json();
                   // Score + breakdown
                   if (data.score === undefined || data.score === null) {
@@ -222,7 +290,17 @@ def create_app() -> Flask:
                   $("status").textContent = `Done. Audited ${totalPages} page(s).`;
                 } catch (e) {
                   console.error(e);
-                  $("status").textContent = "Error running audit. See console.";
+                  const fallbackMessage = 'Error running audit. Please try again.';
+                  let message = fallbackMessage;
+                  if (typeof e === 'string' && e.trim()) {
+                    message = e.trim();
+                  } else if (e && typeof e === 'object') {
+                    const possibleMessage = typeof e.message === 'string' ? e.message.trim() : '';
+                    if (possibleMessage) {
+                      message = possibleMessage;
+                    }
+                  }
+                  $("status").textContent = message;
                 } finally {
                   $("audit").disabled = false;
                 }
