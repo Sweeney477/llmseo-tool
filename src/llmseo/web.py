@@ -97,6 +97,7 @@ def create_app() -> Flask:
                     <div class="row" style="margin:8px 0 6px 0;">
                       <button class="secondary" id="copy">Copy</button>
                       <button class="secondary" id="download">Download</button>
+                      <button class="secondary" id="download-json" disabled>Download JSON</button>
                     </div>
                     <pre id="llmtxt"># run an audit to generate</pre>
                   </div>
@@ -121,11 +122,15 @@ def create_app() -> Flask:
               const pagesList = $("pages");
               const keywordsCard = $("keywords-card");
               const keywordsList = $("keywords");
+              const downloadJsonBtn = $("download-json");
               const orDefault = (value, fallback) => (value === undefined || value === null ? fallback : value);
+              let lastAuditResult = null;
 
               async function runAudit() {
                 const url = $("url").value.trim();
                 const maxPages = Math.max(1, parseInt(maxPagesInput.value, 10) || 1);
+                downloadJsonBtn.disabled = true;
+                lastAuditResult = null;
                 if (!url) { $("status").textContent = "Please enter a URL"; return; }
                 $("status").textContent = `Auditing up to ${maxPages} page(s)…`;
                 $("audit").disabled = true;
@@ -141,6 +146,8 @@ def create_app() -> Flask:
                   });
                   if (!res.ok) throw new Error('Request failed');
                   const data = await res.json();
+                  lastAuditResult = data;
+                  downloadJsonBtn.disabled = false;
                   // Score + breakdown
                   if (data.score === undefined || data.score === null) {
                     $("score").textContent = '—';
@@ -223,6 +230,8 @@ def create_app() -> Flask:
                 } catch (e) {
                   console.error(e);
                   $("status").textContent = "Error running audit. See console.";
+                  lastAuditResult = null;
+                  downloadJsonBtn.disabled = true;
                 } finally {
                   $("audit").disabled = false;
                 }
@@ -243,9 +252,20 @@ def create_app() -> Flask:
                 a.click();
                 a.remove();
               }
+              function downloadJson() {
+                if (!lastAuditResult) { return; }
+                const blob = new Blob([JSON.stringify(lastAuditResult, null, 2)], {type:'application/json'});
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = 'audit.json';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+              }
               $("audit").addEventListener('click', runAudit);
               $("copy").addEventListener('click', copyTxt);
               $("download").addEventListener('click', downloadTxt);
+              downloadJsonBtn.addEventListener('click', downloadJson);
               </script>
             </body>
             </html>
