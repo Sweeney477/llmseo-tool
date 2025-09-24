@@ -110,6 +110,7 @@ def create_app() -> Flask:
               const maxPagesInput = $("max-pages");
               const pagesCard = $("pages-card");
               const pagesList = $("pages");
+              const orDefault = (value, fallback) => (value === undefined || value === null ? fallback : value);
 
               async function runAudit() {
                 const url = $("url").value.trim();
@@ -128,15 +129,20 @@ def create_app() -> Flask:
                   if (!res.ok) throw new Error('Request failed');
                   const data = await res.json();
                   // Score + breakdown
-                  $("score").textContent = `${data.score ?? '—'}` + '/100';
+                  if (data.score === undefined || data.score === null) {
+                    $("score").textContent = '—';
+                  } else {
+                    $("score").textContent = `${data.score}/100`;
+                  }
                   const bd = data.breakdown || {};
                   $("breakdown").innerHTML = Object.keys(bd).sort().map(k=>pill(k, bd[k])).join('');
                   // Recs
                   $("recs").innerHTML = (data.recommendations||[]).map(r=>`<li>${r}</li>`).join('');
                   // Facts
                   const p = data.page || {};
+                  const pagesCount = orDefault(data.sampled_pages, (data.pages || []).length || 0);
                   const facts = [
-                    ['Pages audited', fmt(data.sampled_pages ?? (data.pages || []).length || 0)],
+                    ['Pages audited', fmt(pagesCount)],
                     ['URL', fmt(p.url)],
                     ['Status', fmt(p.status_code)],
                     ['Title', fmt(p.title)],
@@ -157,8 +163,8 @@ def create_app() -> Flask:
                   if (pages.length) {
                     const cards = pages.map((p, idx) => {
                       const score = p.score!=null ? `${p.score}/100` : '—';
-                      const status = p.status_code ?? '—';
-                      const words = p.word_count ?? '—';
+                      const status = orDefault(p.status_code, '—');
+                      const words = orDefault(p.word_count, '—');
                       const reading = typeof p.reading_ease === 'number' ? p.reading_ease.toFixed(1) : '—';
                       const faq = p.has_faq_schema ? 'yes' : 'no';
                       return `
@@ -179,7 +185,7 @@ def create_app() -> Flask:
                     pagesCard.style.display = 'none';
                     pagesList.innerHTML = '';
                   }
-                  const totalPages = data.sampled_pages ?? pages.length;
+                  const totalPages = orDefault(data.sampled_pages, pages.length);
                   $("status").textContent = `Done. Audited ${totalPages} page(s).`;
                 } catch (e) {
                   console.error(e);
