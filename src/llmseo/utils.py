@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-import math
+from typing import List
 from urllib.parse import urlparse, urljoin
 
 
@@ -81,3 +81,26 @@ def flesch_reading_ease(words: int, sentences: int, syllables: int) -> float:
 def clamp(n: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, n))
 
+
+def extract_links(base_url: str, html: str, limit: int = 50) -> List[str]:
+    """Return up to ``limit`` absolute URLs discovered in anchor tags."""
+    links: List[str] = []
+    seen = set()
+    for match in re.finditer(r"<a[^>]+href=[\"']([^\"']+)[\"']", html, flags=re.I):
+        href = match.group(1).strip()
+        if not href or href.startswith("#"):
+            continue
+        lower = href.lower()
+        if lower.startswith("javascript:") or lower.startswith("mailto:"):
+            continue
+        absolute = to_absolute(base_url, href)
+        if not absolute:
+            continue
+        absolute = absolute.split("#", 1)[0]
+        if absolute in seen:
+            continue
+        seen.add(absolute)
+        links.append(absolute)
+        if len(links) >= limit:
+            break
+    return links

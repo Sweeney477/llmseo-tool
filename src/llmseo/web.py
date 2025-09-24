@@ -33,8 +33,10 @@ def create_app() -> Flask:
                 main { max-width: 1100px; margin: 0 auto; padding: 24px; }
                 .row { display:flex; gap:16px; align-items:flex-end; flex-wrap:wrap; }
                 input[type=url] { flex: 1; padding: 12px 12px; border-radius: 8px; border:1px solid #2a2d31; background: #0f1114; color: var(--fg); }
+                input[type=number] { width: 110px; padding: 12px 12px; border-radius: 8px; border:1px solid #2a2d31; background: #0f1114; color: var(--fg); }
                 button { padding: 10px 14px; border-radius: 8px; border:1px solid #2a2d31; background: var(--acc); color: #fff; cursor: pointer; font-weight:600; }
                 button.secondary { background:#1d2025; color:var(--fg); }
+                .stack { display:flex; flex-direction:column; gap:6px; }
                 .grid { display:grid; grid-template-columns: 1fr 1fr; gap:16px; }
                 .card { background: var(--card); border:1px solid #202328; border-radius: 10px; padding:16px; }
                 .muted { color: var(--muted); }
@@ -45,6 +47,10 @@ def create_app() -> Flask:
                 .pill { display:inline-block; padding:2px 8px; border-radius:999px; background:#1d2025; border:1px solid #2a2d31; margin: 0 6px 6px 0; }
                 .flex { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
                 .small { font-size:12px; }
+                .pages { display:flex; flex-direction:column; gap:8px; margin-top:12px; }
+                .page-card { border:1px solid #202328; border-radius:8px; padding:12px; background:#0f1114; }
+                .page-card .page-url { font-weight:600; word-break:break-word; margin:4px 0 8px 0; }
+                .page-meta { font-size:12px; color: var(--muted); margin-top:6px; }
                 @media (max-width: 920px) { .grid { grid-template-columns: 1fr; } }
               </style>
             </head>
@@ -56,6 +62,10 @@ def create_app() -> Flask:
               <main>
                 <div class="row">
                   <input id="url" type="url" placeholder="https://example.com" />
+                  <div class="stack">
+                    <label for="max-pages" class="muted small">Pages</label>
+                    <input id="max-pages" type="number" min="1" max="20" value="1" />
+                  </div>
                   <button id="audit">Run Audit</button>
                 </div>
                 <div id="status" class="muted" style="margin-top:10px;"></div>
@@ -87,22 +97,33 @@ def create_app() -> Flask:
                     <pre id="llmtxt"># run an audit to generate</pre>
                   </div>
                 </div>
+
+                <div id="pages-card" class="card" style="margin-top:16px; display:none;">
+                  <div class="muted small">Pages Audited</div>
+                  <div id="pages" class="pages"></div>
+                </div>
               </main>
               <script>
               const $ = (id)=>document.getElementById(id);
               const fmt = (v)=> v===null||v===undefined||v===""?"(missing)":v;
               const pill = (k,v)=>`<span class="pill">${k}: <b>${v}</b></span>`;
+              const maxPagesInput = $("max-pages");
+              const pagesCard = $("pages-card");
+              const pagesList = $("pages");
 
               async function runAudit() {
                 const url = $("url").value.trim();
+                const maxPages = Math.max(1, parseInt(maxPagesInput.value, 10) || 1);
                 if (!url) { $("status").textContent = "Please enter a URL"; return; }
-                $("status").textContent = "Auditing…";
+                $("status").textContent = `Auditing up to ${maxPages} page(s)…`;
                 $("audit").disabled = true;
+                pagesCard.style.display = 'none';
+                pagesList.innerHTML = '';
                 try {
                   const res = await fetch('/api/audit', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ url })
+                    body: JSON.stringify({ url, max_pages: maxPages })
                   });
                   if (!res.ok) throw new Error('Request failed');
                   const data = await res.json();
@@ -115,6 +136,7 @@ def create_app() -> Flask:
                   // Facts
                   const p = data.page || {};
                   const facts = [
+                    ['Pages audited', fmt(data.sampled_pages ?? (data.pages || []).length || 0)],
                     ['URL', fmt(p.url)],
                     ['Status', fmt(p.status_code)],
                     ['Title', fmt(p.title)],
@@ -131,7 +153,34 @@ def create_app() -> Flask:
                   $("facts").innerHTML = facts.map(([k,v])=>`<div class="muted">${k}</div><div>${v}</div>`).join('');
                   // llm.txt
                   $("llmtxt").textContent = data.llm_txt_draft || '# none';
-                  $("status").textContent = "Done";
+                  const pages = data.pages || [];
+                  if (pages.length) {
+                    const cards = pages.map((p, idx) => {
+                      const score = p.score!=null ? `${p.score}/100` : '—';
+                      const status = p.status_code ?? '—';
+                      const words = p.word_count ?? '—';
+                      const reading = typeof p.reading_ease === 'number' ? p.reading_ease.toFixed(1) : '—';
+                      const faq = p.has_faq_schema ? 'yes' : 'no';
+                      return `
+                        <div class="page-card">
+                          <div class="muted small">Page ${idx + 1}</div>
+                          <div class="page-url">${fmt(p.url)}</div>
+                          <div class="flex small" style="margin-top:6px;">
+                            <span class="pill">score: ${score}</span>
+                            <span class="pill">status: ${status}</span>
+                          </div>
+                          <div class="page-meta">words: ${words} • reading ease: ${reading} • faq schema: ${faq}</div>
+                        </div>
+                      `;
+                    }).join('');
+                    pagesCard.style.display = 'block';
+                    pagesList.innerHTML = cards;
+                  } else {
+                    pagesCard.style.display = 'none';
+                    pagesList.innerHTML = '';
+                  }
+                  const totalPages = data.sampled_pages ?? pages.length;
+                  $("status").textContent = `Done. Audited ${totalPages} page(s).`;
                 } catch (e) {
                   console.error(e);
                   $("status").textContent = "Error running audit. See console.";
@@ -172,12 +221,38 @@ def create_app() -> Flask:
             url = str(payload.get("url", "")).strip()
             if not url:
                 return jsonify({"error": "Missing 'url'"}), 400
-            site = audit_url(url)
+            try:
+                max_pages = int(payload.get("max_pages", 1))
+            except (TypeError, ValueError):
+                max_pages = 1
+            site = audit_url(url, max_pages=max_pages)
             llm_txt = generate_llm_txt(site.base_url, sitemaps=site.sitemaps)
+            pages_payload = [
+                {
+                    "url": p.url,
+                    "status_code": p.status_code,
+                    "score": p.score,
+                    "breakdown": p.breakdown,
+                    "title": p.title,
+                    "description": p.description,
+                    "canonical": p.canonical,
+                    "og": p.og_tags,
+                    "json_ld_types": p.json_ld_types,
+                    "reading_ease": p.reading_ease,
+                    "word_count": p.text_stats.get("word_count"),
+                    "has_faq_schema": p.has_faq_schema,
+                    "blocked_by_robots": p.blocked_by_robots,
+                    "meta_robots": p.meta_robots,
+                    "recommendations": p.recommendations,
+                }
+                for p in site.pages
+            ]
             data = {
                 "score": site.score,
                 "breakdown": site.breakdown,
                 "recommendations": site.recommendations,
+                "sampled_pages": len(site.pages),
+                "pages": pages_payload,
                 "page": {
                     "url": site.page.url if site.page else None,
                     "status_code": site.page.status_code if site.page else None,
@@ -187,7 +262,7 @@ def create_app() -> Flask:
                     "og": site.page.og_tags if site.page else None,
                     "json_ld_types": site.page.json_ld_types if site.page else None,
                     "reading_ease": site.page.reading_ease if site.page else None,
-                    "word_count": site.page.text_stats["word_count"] if site.page else None,
+                    "word_count": site.page.text_stats.get("word_count") if site.page else None,
                     "has_faq_schema": site.page.has_faq_schema if site.page else None,
                     "blocked_by_robots": site.page.blocked_by_robots if site.page else None,
                 },
@@ -217,4 +292,3 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

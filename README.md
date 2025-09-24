@@ -2,6 +2,7 @@
 - Audits a website URL for LLM discoverability.
 - Generates a draft `llm.txt` you can publish at `/.well-known/llm.txt`.
 - Produces a 0–100 score, a breakdown, and actionable recommendations.
+- Samples up to N internal pages and averages findings for a broader view.
 
 **Install**
 - Requires Python 3.9+.
@@ -15,18 +16,15 @@
   ```
 
 **Usage**
-- Basic audit:
+- Basic audit (single page):
   ```bash
   PYTHONPATH=./src python -m llmseo.cli https://example.com
   ```
-- Save a generated `llm.txt`:
+- Crawl multiple internal pages and save outputs:
   ```bash
-  PYTHONPATH=./src python -m llmseo.cli https://example.com --save-llm-txt --out-dir ./out
+  PYTHONPATH=./src python -m llmseo.cli https://example.com --max-pages 5 --json --save-llm-txt --out-dir ./out > report.json
   ```
-- JSON output (for pipelines):
-  ```bash
-  PYTHONPATH=./src python -m llmseo.cli https://example.com --json > report.json
-  ```
+- The published console output lists per-page scores, average breakdowns, and domain-level recommendations.
 
 **Web UI**
 - Launch the local UI:
@@ -36,7 +34,8 @@
   PYTHONPATH=./src python -m llmseo.web --host 0.0.0.0 --port 8080 --debug
   ```
 - Open `http://127.0.0.1:5173` or `http://localhost:8080` and enter a URL to audit.
-- The UI shows score, breakdown, key facts, recommendations, and a generated `llm.txt` that you can copy or download.
+- Set the **Pages** input to sample additional internal URLs (results appear in the "Pages Audited" list).
+- The UI shows the averaged score/breakdown, per-page snapshots, recommendations, and a generated `llm.txt` ready to copy or download.
 
 **What It Checks**
 - Indexability: robots.txt and meta robots signals.
@@ -62,6 +61,11 @@
 - If web UI won't connect, try different ports (8080, 3000) or hosts (0.0.0.0)
 - On macOS, you may need to accept Xcode license: `sudo xcodebuild -license accept`
 
+**CI / Automation**
+- `.github/workflows/ci.yml` installs the package, runs smoke-import tests, and executes `llm-seo` against `https://example.com` with `--max-pages 3`.
+- Each run uploads `audit.json` and the generated `llm.txt` as GitHub Action artifacts for quick review.
+
 **Next Steps**
-- Want a small crawler over multiple internal pages? I can extend the tool to sample N pages and aggregate scores.
-- Prefer a Node.js version or GitHub Action? I can add that too.
+- Allow supplying seed URLs or sitemap.xml inputs to guide the crawl queue.
+- Export a formatted HTML/Markdown report that bundles key findings and llm.txt.
+- Explore a lightweight Node.js wrapper for environments without Python.

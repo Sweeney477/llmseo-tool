@@ -33,3 +33,15 @@ jobs:
           print('smoke-ok')
           PY
 
+      - name: Sample audit run
+        run: |
+          llm-seo https://example.com --json --max-pages 3 --save-llm-txt --out-dir out > audit.json
+          cat audit.json
+
+      - name: Upload audit artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sample-audit
+          path: |
+            audit.json
+            out/llm.txt

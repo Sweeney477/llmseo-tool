@@ -18,9 +18,15 @@ def main(argv=None):
     parser.add_argument("--save-llm-txt", action="store_true", help="Write generated llm.txt to output directory")
     parser.add_argument("--out-dir", default=".", help="Directory to write outputs (default: current directory)")
     parser.add_argument("--json", dest="as_json", action="store_true", help="Output JSON report to stdout")
+    parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=1,
+        help="Sample up to N internal pages and average results (default: 1)",
+    )
     args = parser.parse_args(argv)
 
-    site = audit_url(args.url)
+    site = audit_url(args.url, max_pages=args.max_pages)
 
     # Generate llm.txt draft
     llm_txt = generate_llm_txt(site.base_url, sitemaps=site.sitemaps)
@@ -32,12 +38,34 @@ def main(argv=None):
         (out_dir / "llm.txt").write_text(llm_txt, encoding="utf-8")
 
     if args.as_json:
+        pages_payload = [
+            {
+                "url": p.url,
+                "status_code": p.status_code,
+                "score": p.score,
+                "breakdown": p.breakdown,
+                "title": p.title,
+                "description": p.description,
+                "canonical": p.canonical,
+                "og": p.og_tags,
+                "json_ld_types": p.json_ld_types,
+                "reading_ease": p.reading_ease,
+                "word_count": p.text_stats.get("word_count"),
+                "has_faq_schema": p.has_faq_schema,
+                "blocked_by_robots": p.blocked_by_robots,
+                "meta_robots": p.meta_robots,
+                "recommendations": p.recommendations,
+            }
+            for p in site.pages
+        ]
         print(
             json.dumps(
                 {
                     "score": site.score,
                     "breakdown": site.breakdown,
                     "recommendations": site.recommendations,
+                    "sampled_pages": len(site.pages),
+                    "pages": pages_payload,
                     "page": {
                         "url": site.page.url if site.page else None,
                         "status_code": site.page.status_code if site.page else None,
@@ -47,8 +75,9 @@ def main(argv=None):
                         "og": site.page.og_tags if site.page else None,
                         "json_ld_types": site.page.json_ld_types if site.page else None,
                         "reading_ease": site.page.reading_ease if site.page else None,
-                        "word_count": site.page.text_stats["word_count"] if site.page else None,
+                        "word_count": site.page.text_stats.get("word_count") if site.page else None,
                         "has_faq_schema": site.page.has_faq_schema if site.page else None,
+                        "blocked_by_robots": site.page.blocked_by_robots if site.page else None,
                     },
                     "llm_txt_found": site.llm_txt_found,
                     "llm_txt_url": site.llm_txt_url,
@@ -61,27 +90,30 @@ def main(argv=None):
         return 0
 
     # Human-readable output
-    print(f"LLM Discoverability Score: {site.score}/100")
+    total_pages = len(site.pages)
+    print(f"LLM Discoverability Score (avg across {total_pages} page(s)): {site.score}/100")
     if site.breakdown:
-        print("Breakdown:")
+        print("Breakdown (average contributions):")
         for k, v in site.breakdown.items():
             print(f"  - {k}: {v}")
 
-    print("\nKey Facts:")
-    if site.page:
-        p = site.page
-        print(f"  - URL: {p.url}")
-        print(f"  - Status: {p.status_code}")
-        print(f"  - Title: {p.title or '(missing)'}")
-        print(f"  - Description: {p.description or '(missing)'}")
-        print(f"  - Canonical: {p.canonical or '(missing)'}")
-        print(f"  - JSON-LD types: {', '.join(p.json_ld_types) or '(none)'}")
-        print(f"  - Word count: {p.text_stats['word_count']}")
-        print(f"  - Flesch reading ease: {p.reading_ease:.1f}")
-        print(f"  - Has FAQ schema: {'yes' if p.has_faq_schema else 'no'}")
-        print(f"  - Robots blocked: {'yes' if p.blocked_by_robots else 'no'}")
-        print(f"  - Sitemap(s): {', '.join(site.sitemaps) if site.sitemaps else '(none found)'}")
-        print(f"  - LLM policy present: {'yes' if site.llm_txt_found else 'no'}")
+    if total_pages:
+        print(f"\nPages audited: {total_pages}")
+        for idx, p in enumerate(site.pages, start=1):
+            print(f"\nPage {idx}: {p.url}")
+            print(f"  Score: {p.score}/100")
+            print(f"  Status: {p.status_code}")
+            print(f"  Title: {p.title or '(missing)'}")
+            print(f"  Description: {p.description or '(missing)'}")
+            print(f"  Canonical: {p.canonical or '(missing)'}")
+            print(f"  JSON-LD types: {', '.join(p.json_ld_types) or '(none)'}")
+            print(f"  Word count: {p.text_stats.get('word_count', 0)}")
+            print(f"  Flesch reading ease: {p.reading_ease:.1f}")
+            print(f"  Has FAQ schema: {'yes' if p.has_faq_schema else 'no'}")
+            print(f"  Robots blocked: {'yes' if p.blocked_by_robots else 'no'}")
+
+    print(f"\nSitemap(s): {', '.join(site.sitemaps) if site.sitemaps else '(none found)'}")
+    print(f"LLM policy present: {'yes' if site.llm_txt_found else 'no'}")
 
     if site.recommendations:
         print("\nRecommendations:")
@@ -99,4 +131,3 @@ def main(argv=None):
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

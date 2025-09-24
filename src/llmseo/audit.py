@@ -2,12 +2,23 @@ from __future__ import annotations
 
 import json
 import re
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Deque, Dict, List, Optional, Set, Tuple
+from urllib.parse import urlparse
 
 import requests
 
-from .utils import normalize_url, extract_visible_text, word_stats, flesch_reading_ease, to_absolute, is_same_origin, clamp
+from .utils import (
+    clamp,
+    extract_links,
+    extract_visible_text,
+    flesch_reading_ease,
+    is_same_origin,
+    normalize_url,
+    to_absolute,
+    word_stats,
+)
 
 
 @dataclass
@@ -27,6 +38,9 @@ class PageAudit:
     meta_robots: Optional[str]
     blocked_by_robots: bool
     semantic_tags_present: List[str]
+    score: float = 0.0
+    breakdown: Dict[str, float] = field(default_factory=dict)
+    recommendations: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -38,12 +52,40 @@ class SiteAudit:
     llm_txt_found: bool = False
     llm_txt_body: Optional[str] = None
     page: Optional[PageAudit] = None
+    pages: List[PageAudit] = field(default_factory=list)
     score: float = 0.0
     breakdown: Dict[str, float] = field(default_factory=dict)
     recommendations: List[str] = field(default_factory=list)
 
 
 UA = "llmseo-tool/0.1 (+https://example.com)"
+WEIGHTS = {
+    "indexability": 15.0,
+    "metadata": 20.0,
+    "structure": 20.0,
+    "structured_data": 15.0,
+    "content_depth": 15.0,
+    "policy": 10.0,
+    "sitemap": 5.0,
+}
+NON_HTML_EXTENSIONS = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".svg",
+    ".webp",
+    ".ico",
+    ".css",
+    ".js",
+    ".pdf",
+    ".zip",
+    ".mp4",
+    ".mp3",
+    ".mov",
+    ".avi",
+}
+MAX_LINKS_PER_PAGE = 50
 
 
 def fetch(url: str, timeout: int = 15) -> Tuple[int, str, Dict[str, str]]:
@@ -57,7 +99,6 @@ def get_head(html: str) -> str:
 
 
 def get_attr(tag_html: str, attr: str) -> Optional[str]:
-    # simple attribute extractor
     m = re.search(fr"{attr}=[\"']([^\"']+)[\"']", tag_html, flags=re.I)
     return m.group(1) if m else None
 
@@ -95,7 +136,9 @@ def extract_canonical(head_html: str, base_url: str) -> Optional[str]:
 def extract_json_ld_types(html: str) -> Tuple[List[str], bool]:
     types: List[str] = []
     has_faq = False
-    for m in re.finditer(r"<script[^>]+type=[\"']application/ld\+json[\"'][^>]*>([\s\S]*?)</script>", html, flags=re.I):
+    for m in re.finditer(
+        r"<script[^>]+type=[\"']application/ld\+json[\"'][^>]*>([\s\S]*?)</script>", html, flags=re.I
+    ):
         body = m.group(1).strip()
         try:
             data = json.loads(body)
@@ -142,128 +185,26 @@ def parse_robots(robots_txt: str) -> Dict[str, List[str]]:
 
 
 def check_blocked(disallow_paths: List[str], url: str) -> bool:
-    # Very coarse: if path starts with any disallowed path
-    from urllib.parse import urlparse
-
-    p = urlparse(url)
+    parsed = urlparse(url)
     for d in disallow_paths:
         d = d.strip()
         if not d:
             continue
-        if p.path.startswith(d):
+        if parsed.path.startswith(d):
             return True
     return False
 
 
-def audit_url(url: str) -> SiteAudit:
-    url = normalize_url(url)
-    site = SiteAudit(base_url=url, robots_txt=None)
+def _score_components(page: PageAudit, site: SiteAudit) -> Dict[str, float]:
+    components: Dict[str, float] = {}
 
-    # Fetch main page
-    status, html, headers = fetch(url)
-    head = get_head(html)
-    metas = extract_meta(head)
-    title = extract_title(head)
-    description = metas.get("name:description") or metas.get("prop:og:description")
-    canonical = extract_canonical(head, url)
-    og = {k[5:]: v for k, v in metas.items() if k.startswith("prop:og:")}
-    has_lang_attr = bool(re.search(r"<html[^>]+lang=", html, flags=re.I))
-    headings = {
-        "h1": re.findall(r"<h1[^>]*>([\s\S]*?)</h1>", html, flags=re.I),
-        "h2": re.findall(r"<h2[^>]*>([\s\S]*?)</h2>", html, flags=re.I),
-        "h3": re.findall(r"<h3[^>]*>([\s\S]*?)</h3>", html, flags=re.I),
-    }
-    json_ld_types, has_faq_schema = extract_json_ld_types(html)
-    text = extract_visible_text(html)
-    stats = word_stats(text)
-    reading_ease = flesch_reading_ease(stats["word_count"], stats["sentence_count"], stats["syllables"])
-    meta_robots = metas.get("name:robots")
-    semantic_tags_present = detect_semantic_tags(html)
-
-    # robots.txt
-    from urllib.parse import urlparse
-
-    parsed = urlparse(url)
-    robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
-    try:
-        r_status, r_body, _ = fetch(robots_url)
-        if 200 <= r_status < 300 and r_body:
-            site.robots_txt = r_body
-            r = parse_robots(r_body)
-            site.sitemaps = r["sitemaps"]
-            blocked = check_blocked(r["disallow"], url)
-        else:
-            blocked = False
-    except Exception:
-        blocked = False
-
-    # llm.txt discovery
-    llm_candidates = [
-        f"{parsed.scheme}://{parsed.netloc}/.well-known/llm.txt",
-        f"{parsed.scheme}://{parsed.netloc}/llm.txt",
-    ]
-    for cand in llm_candidates:
-        try:
-            c_status, c_body, _ = fetch(cand)
-            if 200 <= c_status < 300 and c_body:
-                site.llm_txt_found = True
-                site.llm_txt_url = cand
-                site.llm_txt_body = c_body
-                break
-        except Exception:
-            pass
-
-    page = PageAudit(
-        url=url,
-        status_code=status,
-        title=title,
-        description=description,
-        canonical=canonical,
-        og_tags=og,
-        has_lang_attr=has_lang_attr,
-        headings=headings,
-        json_ld_types=json_ld_types,
-        has_faq_schema=has_faq_schema,
-        text_stats=stats,
-        reading_ease=reading_ease,
-        meta_robots=meta_robots,
-        blocked_by_robots=blocked,
-        semantic_tags_present=semantic_tags_present,
-    )
-    site.page = page
-
-    score_site(site)
-    derive_recommendations(site)
-    return site
-
-
-def score_site(site: SiteAudit) -> None:
-    page = site.page
-    if not page:
-        return
-
-    # Weights (sum to 100)
-    weights = {
-        "indexability": 15.0,
-        "metadata": 20.0,
-        "structure": 20.0,
-        "structured_data": 15.0,
-        "content_depth": 15.0,
-        "policy": 10.0,
-        "sitemap": 5.0,
-    }
-
-    breakdown = {}
-
-    # indexability
     idx = 1.0
     if page.blocked_by_robots:
         idx = 0.0
     if page.meta_robots and any(tok in page.meta_robots.lower() for tok in ["noindex", "nofollow"]):
         idx *= 0.3
-    breakdown["indexability"] = weights["indexability"] * idx
+    components["indexability"] = WEIGHTS["indexability"] * idx
 
-    # metadata completeness: title, description, og tags, lang, canonical
     m_score = 0.0
     if page.title and 10 <= len(page.title.strip()) <= 65:
         m_score += 0.35
@@ -282,9 +223,8 @@ def score_site(site: SiteAudit) -> None:
     if page.has_lang_attr:
         m_score += 0.05
     m_score = clamp(m_score, 0, 1)
-    breakdown["metadata"] = weights["metadata"] * m_score
+    components["metadata"] = WEIGHTS["metadata"] * m_score
 
-    # structure: h1 present, multiple h2/h3, semantic tags
     s_score = 0.0
     if page.headings["h1"]:
         s_score += 0.45
@@ -295,84 +235,238 @@ def score_site(site: SiteAudit) -> None:
     if page.semantic_tags_present:
         s_score += 0.15
     s_score = clamp(s_score, 0, 1)
-    breakdown["structure"] = weights["structure"] * s_score
+    components["structure"] = WEIGHTS["structure"] * s_score
 
-    # structured data: presence and helpful types
     sd_score = 0.0
-    if site.page.json_ld_types:
+    if page.json_ld_types:
         sd_score += 0.4
-        # Boost for FAQ, Article, Product, Organization, WebSite
         target = {"FAQPage", "Article", "Product", "Organization", "WebSite", "HowTo"}
-        if any(t in target for t in site.page.json_ld_types):
+        if any(t in target for t in page.json_ld_types):
             sd_score += 0.4
     sd_score = clamp(sd_score, 0, 1)
-    breakdown["structured_data"] = weights["structured_data"] * sd_score
+    components["structured_data"] = WEIGHTS["structured_data"] * sd_score
 
-    # content depth and readability
     c_score = 0.0
-    wc = page.text_stats["word_count"]
+    wc = page.text_stats.get("word_count", 0)
     if wc >= 800:
         c_score += 0.5
     elif wc >= 400:
         c_score += 0.35
     elif wc >= 200:
         c_score += 0.2
-    # readability ideal 50-70 (Flesch)
     re_score = 1.0 - (abs(page.reading_ease - 60) / 60)
     re_score = clamp(re_score, 0, 1)
     c_score = clamp(c_score + 0.3 * re_score, 0, 1)
-    breakdown["content_depth"] = weights["content_depth"] * c_score
+    components["content_depth"] = WEIGHTS["content_depth"] * c_score
 
-    # policy (llm.txt presence)
     p_score = 1.0 if site.llm_txt_found else 0.0
-    breakdown["policy"] = weights["policy"] * p_score
+    components["policy"] = WEIGHTS["policy"] * p_score
 
-    # sitemap presence in robots
     sm_score = 1.0 if site.sitemaps else 0.0
-    breakdown["sitemap"] = weights["sitemap"] * sm_score
+    components["sitemap"] = WEIGHTS["sitemap"] * sm_score
 
-    total = sum(breakdown.values())
-    site.score = round(total, 1)
-    site.breakdown = {k: round(v, 1) for k, v in breakdown.items()}
+    return components
+
+
+def score_site(site: SiteAudit) -> None:
+    if not site.pages:
+        site.score = 0.0
+        site.breakdown = {k: 0.0 for k in WEIGHTS}
+        return
+
+    totals = {k: 0.0 for k in WEIGHTS}
+    aggregated_score = 0.0
+    for page in site.pages:
+        components = _score_components(page, site)
+        page_score = sum(components.values())
+        page.score = round(page_score, 1)
+        page.breakdown = {k: round(v, 1) for k, v in components.items()}
+        aggregated_score += page_score
+        for k, v in components.items():
+            totals[k] += v
+
+    count = len(site.pages)
+    site.score = round(aggregated_score / count, 1)
+    site.breakdown = {k: round((totals[k] / count), 1) for k in totals}
+    site.page = site.pages[0]
+
+
+def _page_recommendations(page: PageAudit) -> List[str]:
+    recs: List[str] = []
+    if page.blocked_by_robots:
+        recs.append("Allow the page in robots.txt (avoid disallowing this path).")
+    if page.meta_robots and any(tok in page.meta_robots.lower() for tok in ["noindex", "nofollow"]):
+        recs.append("Remove 'noindex'/'nofollow' meta robots for LLM discoverability.")
+    if not page.title or not (10 <= len((page.title or '').strip()) <= 65):
+        recs.append("Add a concise, descriptive <title> (10–65 chars).")
+    if not page.description or not (50 <= len((page.description or '').strip()) <= 160):
+        recs.append("Add a meta description (50–160 chars) summarizing the page.")
+    if not page.canonical:
+        recs.append("Add a canonical <link> to prevent duplication.")
+    if not page.has_lang_attr:
+        recs.append("Set the <html lang=\"...\"> attribute for language clarity.")
+    if not page.headings["h1"]:
+        recs.append("Include a single, clear H1 headline.")
+    if len(page.headings["h2"]) < 2:
+        recs.append("Structure content with multiple H2 sections.")
+    if len(page.headings["h3"]) < 2:
+        recs.append("Use H3 subsections to organize details.")
+    if not page.semantic_tags_present:
+        recs.append("Use semantic HTML (<article>, <section>, <main>, etc.).")
+    if not page.json_ld_types:
+        recs.append("Add JSON-LD structured data (WebSite/Organization/Article/FAQ).")
+    elif not page.has_faq_schema:
+        recs.append("Add FAQPage JSON-LD for common questions and answers.")
+    if page.text_stats.get("word_count", 0) < 400:
+        recs.append("Increase content depth to 400–800+ words of unique text.")
+    return recs
 
 
 def derive_recommendations(site: SiteAudit) -> None:
-    recs: List[str] = []
-    p = site.page
-    if not p:
-        site.recommendations = ["Failed to fetch the page."]
+    if not site.pages:
+        site.recommendations = ["Failed to fetch any pages."]
         return
 
-    if p.blocked_by_robots:
-        recs.append("Allow the page in robots.txt (avoid disallowing this path).")
-    if p.meta_robots and any(tok in p.meta_robots.lower() for tok in ["noindex", "nofollow"]):
-        recs.append("Remove 'noindex'/'nofollow' meta robots for LLM discoverability.")
-    if not p.title or not (10 <= len((p.title or '').strip()) <= 65):
-        recs.append("Add a concise, descriptive <title> (10–65 chars).")
-    if not p.description or not (50 <= len((p.description or '').strip()) <= 160):
-        recs.append("Add a meta description (50–160 chars) summarizing the page.")
-    if not p.canonical:
-        recs.append("Add a canonical <link> to prevent duplication.")
-    if not p.has_lang_attr:
-        recs.append("Set the <html lang=""...""> attribute for language clarity.")
-    if not p.headings["h1"]:
-        recs.append("Include a single, clear H1 headline.")
-    if len(p.headings["h2"]) < 2:
-        recs.append("Structure content with multiple H2 sections.")
-    if len(p.headings["h3"]) < 2:
-        recs.append("Use H3 subsections to organize details.")
-    if not p.semantic_tags_present:
-        recs.append("Use semantic HTML (<article>, <section>, <main>, etc.).")
-    if not p.json_ld_types:
-        recs.append("Add JSON-LD structured data (WebSite/Organization/Article/FAQ).")
-    elif not p.has_faq_schema:
-        recs.append("Add FAQPage JSON-LD for common questions and answers.")
-    if p.text_stats["word_count"] < 400:
-        recs.append("Increase content depth to 400–800+ words of unique text.")
+    seen: Set[str] = set()
+    combined: List[str] = []
+    multi_page = len(site.pages) > 1
+    for page in site.pages:
+        page.recommendations = _page_recommendations(page)
+        for rec in page.recommendations:
+            message = rec if not multi_page else f"[{page.url}] {rec}"
+            if message in seen:
+                continue
+            seen.add(message)
+            combined.append(message)
+
     if not site.sitemaps:
-        recs.append("Expose a Sitemap in robots.txt for better discovery.")
+        combined.append("Expose a Sitemap in robots.txt for better discovery.")
     if not site.llm_txt_found:
-        recs.append("Publish /.well-known/llm.txt with LLM crawl/citation policy.")
+        combined.append("Publish /.well-known/llm.txt with LLM crawl/citation policy.")
 
-    site.recommendations = recs
+    site.recommendations = combined
 
+
+def _should_follow(link: str) -> bool:
+    parsed = urlparse(link)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    path = parsed.path.lower()
+    return not any(path.endswith(ext) for ext in NON_HTML_EXTENSIONS)
+
+
+def audit_url(url: str, max_pages: int = 1) -> SiteAudit:
+    url = normalize_url(url)
+    try:
+        max_pages = int(max_pages)
+    except (TypeError, ValueError):
+        max_pages = 1
+    max_pages = max(1, max_pages)
+
+    site = SiteAudit(base_url=url, robots_txt=None)
+
+    parsed = urlparse(url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+
+    disallow_paths: List[str] = []
+    robots_url = f"{origin}/robots.txt"
+    try:
+        r_status, r_body, _ = fetch(robots_url)
+        if 200 <= r_status < 300 and r_body:
+            site.robots_txt = r_body
+            robots_data = parse_robots(r_body)
+            site.sitemaps = robots_data["sitemaps"]
+            disallow_paths = robots_data["disallow"]
+    except Exception:
+        pass
+
+    llm_candidates = [
+        f"{origin}/.well-known/llm.txt",
+        f"{origin}/llm.txt",
+    ]
+    for cand in llm_candidates:
+        try:
+            c_status, c_body, _ = fetch(cand)
+            if 200 <= c_status < 300 and c_body:
+                site.llm_txt_found = True
+                site.llm_txt_url = cand
+                site.llm_txt_body = c_body
+                break
+        except Exception:
+            continue
+
+    queue: Deque[str] = deque([url])
+    visited: Set[str] = set()
+
+    while queue and len(site.pages) < max_pages:
+        current = queue.popleft()
+        if current in visited:
+            continue
+        visited.add(current)
+
+        try:
+            status, html, _ = fetch(current)
+        except Exception:
+            status, html = 0, ""
+
+        head = get_head(html)
+        metas = extract_meta(head)
+        title = extract_title(head)
+        description = metas.get("name:description") or metas.get("prop:og:description")
+        canonical = extract_canonical(head, current)
+        og = {k[5:]: v for k, v in metas.items() if k.startswith("prop:og:")}
+        has_lang_attr = bool(re.search(r"<html[^>]+lang=", html, flags=re.I))
+        headings = {
+            "h1": re.findall(r"<h1[^>]*>([\s\S]*?)</h1>", html, flags=re.I),
+            "h2": re.findall(r"<h2[^>]*>([\s\S]*?)</h2>", html, flags=re.I),
+            "h3": re.findall(r"<h3[^>]*>([\s\S]*?)</h3>", html, flags=re.I),
+        }
+        json_ld_types, has_faq_schema = extract_json_ld_types(html)
+        text = extract_visible_text(html)
+        stats = word_stats(text)
+        reading_ease = flesch_reading_ease(
+            int(stats.get("word_count", 0)),
+            int(stats.get("sentence_count", 0)),
+            int(stats.get("syllables", 0)),
+        )
+        meta_robots = metas.get("name:robots")
+        semantic_tags_present = detect_semantic_tags(html)
+        blocked = check_blocked(disallow_paths, current) if disallow_paths else False
+
+        page = PageAudit(
+            url=current,
+            status_code=status,
+            title=title,
+            description=description,
+            canonical=canonical,
+            og_tags=og,
+            has_lang_attr=has_lang_attr,
+            headings=headings,
+            json_ld_types=json_ld_types,
+            has_faq_schema=has_faq_schema,
+            text_stats=stats,
+            reading_ease=reading_ease,
+            meta_robots=meta_robots,
+            blocked_by_robots=blocked,
+            semantic_tags_present=semantic_tags_present,
+        )
+        site.pages.append(page)
+
+        if html and len(site.pages) < max_pages:
+            for link in extract_links(current, html, limit=MAX_LINKS_PER_PAGE):
+                clean = link.split("#", 1)[0]
+                if clean in visited:
+                    continue
+                if not is_same_origin(url, clean):
+                    continue
+                if not _should_follow(clean):
+                    continue
+                if clean == current:
+                    continue
+                if clean in queue:
+                    continue
+                queue.append(clean)
+
+    score_site(site)
+    derive_recommendations(site)
+    return site
