@@ -50,11 +50,29 @@ def create_app() -> Flask:
                 .pages { display:flex; flex-direction:column; gap:8px; margin-top:12px; }
                 .page-card { border:1px solid #202328; border-radius:8px; padding:12px; background:#0f1114; }
                 .page-card .page-url { font-weight:600; word-break:break-word; margin:4px 0 8px 0; }
-                .page-meta { font-size:12px; color: var(--muted); margin-top:6px; }
+                .page-header { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap; }
+                .page-info { flex:1 1 240px; }
+                .page-stats { display:flex; gap:6px; flex-wrap:wrap; }
+                .page-meta { display:flex; flex-wrap:wrap; gap:8px; font-size:12px; color: var(--muted); margin-top:8px; }
+                .page-meta span { display:flex; align-items:center; }
+                .page-meta span + span::before { content:"•"; margin:0 6px; color: var(--muted); }
+                .page-section { margin-top:12px; }
+                .page-breakdown { margin-top:6px; }
+                .page-recs { background:#0f1114; border:1px solid #202328; border-radius:8px; padding:8px 12px; }
+                .page-recs summary { cursor:pointer; font-size:12px; color: var(--muted); }
+                .page-recs[open] { padding-bottom:12px; }
+                .page-recs ul { margin-top:8px; }
+                .page-empty { font-size:12px; color: var(--muted); margin-top:6px; }
                 .keywords { display:flex; flex-direction:column; gap:8px; margin-top:12px; }
                 .keyword-row { display:flex; justify-content:space-between; align-items:center; background:#0f1114; border:1px solid #202328; border-radius:8px; padding:10px 12px; }
                 .keyword-term { font-weight:600; }
                 .keyword-meta { font-size:12px; color: var(--muted); }
+                @media (max-width: 600px) {
+                  .page-header { flex-direction:column; }
+                  .page-stats { width:100%; }
+                  .page-recs { width:100%; }
+                  .page-meta span + span::before { margin:0 4px; }
+                }
                 @media (max-width: 920px) { .grid { grid-template-columns: 1fr; } }
               </style>
             </head>
@@ -115,7 +133,17 @@ def create_app() -> Flask:
               <script>
               const $ = (id)=>document.getElementById(id);
               const fmt = (v)=> v===null||v===undefined||v===""?"(missing)":v;
-              const pill = (k,v)=>`<span class="pill">${k}: <b>${v}</b></span>`;
+              const formatScore = (value) => {
+                if (typeof value === 'number') {
+                  return Number.isInteger(value) ? value.toString() : value.toFixed(1);
+                }
+                if (typeof value === 'string' && value.trim() !== '' && !Number.isNaN(Number(value))) {
+                  const num = Number(value);
+                  return Number.isInteger(num) ? num.toString() : num.toFixed(1);
+                }
+                return value;
+              };
+              const pill = (k,v)=>`<span class="pill">${k}: <b>${formatScore(v)}</b></span>`;
               const maxPagesInput = $("max-pages");
               const pagesCard = $("pages-card");
               const pagesList = $("pages");
@@ -198,17 +226,55 @@ def create_app() -> Flask:
                       const reading = typeof p.reading_ease === 'number' ? p.reading_ease.toFixed(1) : '—';
                       const faq = p.has_faq_schema ? 'yes' : 'no';
                       const pageKeywords = (p.keywords || []).slice(0, 3).map(kw => `<span class="pill">${kw.term} (${kw.score}/100)</span>`).join('');
-                      const keywordBlock = pageKeywords ? `<div class="flex small" style="margin-top:6px;">${pageKeywords}</div>` : '';
+                      const keywordsSection = pageKeywords ? `
+                        <div class="page-section">
+                          <div class="muted small">Top keywords</div>
+                          <div class="flex small">${pageKeywords}</div>
+                        </div>
+                      ` : '';
+                      const breakdownEntries = Object.entries(p.breakdown || {});
+                      const sortedBreakdown = breakdownEntries.sort((a, b) => (parseFloat(b[1]) || 0) - (parseFloat(a[1]) || 0));
+                      const breakdownSection = sortedBreakdown.length ? `
+                        <div class="page-section">
+                          <div class="muted small">Weighted breakdown</div>
+                          <div class="page-breakdown flex small">${sortedBreakdown.map(([k, v]) => pill(k, v)).join('')}</div>
+                        </div>
+                      ` : '';
+                      const pageRecs = Array.isArray(p.recommendations) ? p.recommendations : [];
+                      const recSection = pageRecs.length ? `
+                        <div class="page-section">
+                          <details class="page-recs">
+                            <summary>Recommendations (${pageRecs.length})</summary>
+                            <ul>${pageRecs.map(rec => `<li>${rec}</li>`).join('')}</ul>
+                          </details>
+                        </div>
+                      ` : `
+                        <div class="page-section">
+                          <div class="muted small">Recommendations</div>
+                          <div class="page-empty">No recommendations for this page.</div>
+                        </div>
+                      `;
+                      const metaItems = [
+                        `words: ${words}`,
+                        `reading ease: ${reading}`,
+                        `faq schema: ${faq}`,
+                      ].map(text => `<span>${text}</span>`).join('');
                       return `
                         <div class="page-card">
-                          <div class="muted small">Page ${idx + 1}</div>
-                          <div class="page-url">${fmt(p.url)}</div>
-                          <div class="flex small" style="margin-top:6px;">
-                            <span class="pill">score: ${score}</span>
-                            <span class="pill">status: ${status}</span>
+                          <div class="page-header">
+                            <div class="page-info">
+                              <div class="muted small">Page ${idx + 1}</div>
+                              <div class="page-url">${fmt(p.url)}</div>
+                            </div>
+                            <div class="page-stats small">
+                              <span class="pill">score: ${score}</span>
+                              <span class="pill">status: ${status}</span>
+                            </div>
                           </div>
-                          ${keywordBlock}
-                          <div class="page-meta">words: ${words} • reading ease: ${reading} • faq schema: ${faq}</div>
+                          <div class="page-meta">${metaItems}</div>
+                          ${keywordsSection}
+                          ${breakdownSection}
+                          ${recSection}
                         </div>
                       `;
                     }).join('');
