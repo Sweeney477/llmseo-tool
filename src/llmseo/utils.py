@@ -2,15 +2,41 @@ from __future__ import annotations
 
 import re
 from typing import List
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, urlunparse
 
 
 def normalize_url(url: str) -> str:
-    parsed = urlparse(url)
-    scheme = parsed.scheme or "https"
-    netloc = parsed.netloc or parsed.path
-    path = parsed.path if parsed.netloc else ""
-    return f"{scheme}://{netloc}{path or '/'}"
+    cleaned = url.strip()
+    parsed = urlparse(cleaned)
+    scheme = (parsed.scheme or "").lower()
+    netloc = parsed.netloc
+    path = parsed.path
+    query = parsed.query
+
+    if not netloc:
+        if scheme not in {"http", "https"}:
+            scheme = "https"
+        reparsed = urlparse(f"//{cleaned}", scheme=scheme)
+        if reparsed.netloc:
+            netloc = reparsed.netloc
+            path = reparsed.path
+            query = reparsed.query or query
+    else:
+        scheme = scheme or "https"
+
+    if not netloc and path and not path.startswith("/"):
+        netloc = path
+        path = ""
+
+    if not netloc:
+        raise ValueError(f"Cannot determine host for URL: {url!r}")
+
+    if not path:
+        path = "/"
+    elif not path.startswith("/"):
+        path = f"/{path}"
+
+    return urlunparse((scheme, netloc, path, "", query, ""))
 
 
 def is_same_origin(base: str, other: str) -> bool:

@@ -264,7 +264,10 @@ def create_app() -> Flask:
                 max_pages = int(payload.get("max_pages", 1))
             except (TypeError, ValueError):
                 max_pages = 1
-            site = audit_url(url, max_pages=max_pages)
+            try:
+                site = audit_url(url, max_pages=max_pages)
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 400
             llm_txt = generate_llm_txt(site.base_url, sitemaps=site.sitemaps)
             pages_payload = [
                 {

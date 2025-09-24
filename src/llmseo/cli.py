@@ -26,7 +26,10 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
-    site = audit_url(args.url, max_pages=args.max_pages)
+    try:
+        site = audit_url(args.url, max_pages=args.max_pages)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     # Generate llm.txt draft
     llm_txt = generate_llm_txt(site.base_url, sitemaps=site.sitemaps)
