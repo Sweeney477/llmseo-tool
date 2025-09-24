@@ -1,14 +1,91 @@
 from __future__ import annotations
 
 import argparse
-import json
 from textwrap import dedent
-from typing import Any, Dict
+from typing import Any, Dict, List
+from urllib.parse import urlparse
 
-from flask import Flask, jsonify, request, Response
+from flask import Flask, Response, jsonify, request
 
 from .audit import audit_url
 from .llm_txt import generate_llm_txt
+
+DEFAULT_CONTACT_EMAIL = "webmaster@domain"
+DEFAULT_LICENSE_URL = "https://creativecommons.org/licenses/by/4.0/"
+MAX_LIST_ITEMS = 10
+
+
+def _clean_string(value: Any, *, max_length: int) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        value = str(value)
+    value = value.strip()
+    value = value.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    cleaned = "".join(ch for ch in value if ch.isprintable()).strip()
+    if len(cleaned) > max_length:
+        cleaned = cleaned[:max_length].strip()
+    return cleaned
+
+
+def sanitize_contact(value: Any) -> str:
+    cleaned = _clean_string(value, max_length=254)
+    if not cleaned:
+        return DEFAULT_CONTACT_EMAIL
+    if " " in cleaned or cleaned.count("@") != 1:
+        return DEFAULT_CONTACT_EMAIL
+    local, domain = cleaned.split("@", 1)
+    if not local or not domain:
+        return DEFAULT_CONTACT_EMAIL
+    return cleaned
+
+
+def sanitize_license_url(value: Any) -> str:
+    cleaned = _clean_string(value, max_length=500)
+    if not cleaned:
+        return DEFAULT_LICENSE_URL
+    parsed = urlparse(cleaned)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return DEFAULT_LICENSE_URL
+    return cleaned
+
+
+def _prepare_items(value: Any) -> List[str]:
+    if isinstance(value, list):
+        raw_items = value
+    elif isinstance(value, str):
+        normalized = value.replace("\r", "\n")
+        raw_items = []
+        for part in normalized.split("\n"):
+            raw_items.extend(part.split(","))
+    else:
+        raw_items = []
+    cleaned_items: List[str] = []
+    for item in raw_items:
+        cleaned = _clean_string(item, max_length=200)
+        if cleaned:
+            cleaned_items.append(cleaned)
+    return cleaned_items
+
+
+def sanitize_url_list(value: Any) -> List[str]:
+    items: List[str] = []
+    for candidate in _prepare_items(value):
+        parsed = urlparse(candidate)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            items.append(candidate)
+        if len(items) >= MAX_LIST_ITEMS:
+            break
+    return items
+
+
+def sanitize_string_list(value: Any) -> List[str]:
+    items: List[str] = []
+    for candidate in _prepare_items(value):
+        items.append(candidate)
+        if len(items) >= MAX_LIST_ITEMS:
+            break
+    return items
 
 
 def create_app() -> Flask:
@@ -32,8 +109,9 @@ def create_app() -> Flask:
                 header h1 { margin: 0; font-size: 16px; letter-spacing: 0.3px; }
                 main { max-width: 1100px; margin: 0 auto; padding: 24px; }
                 .row { display:flex; gap:16px; align-items:flex-end; flex-wrap:wrap; }
-                input[type=url] { flex: 1; padding: 12px 12px; border-radius: 8px; border:1px solid #2a2d31; background: #0f1114; color: var(--fg); }
+                input[type=url], input[type=email], input[type=text] { flex: 1; width:100%; padding: 12px 12px; border-radius: 8px; border:1px solid #2a2d31; background: #0f1114; color: var(--fg); }
                 input[type=number] { width: 110px; padding: 12px 12px; border-radius: 8px; border:1px solid #2a2d31; background: #0f1114; color: var(--fg); }
+                textarea { width:100%; padding: 12px 12px; border-radius: 8px; border:1px solid #2a2d31; background: #0f1114; color: var(--fg); font: inherit; resize: vertical; min-height: 96px; }
                 button { padding: 10px 14px; border-radius: 8px; border:1px solid #2a2d31; background: var(--acc); color: #fff; cursor: pointer; font-weight:600; }
                 button.secondary { background:#1d2025; color:var(--fg); }
                 .stack { display:flex; flex-direction:column; gap:6px; }
@@ -71,6 +149,28 @@ def create_app() -> Flask:
                     <input id="max-pages" type="number" min="1" max="20" value="1" />
                   </div>
                   <button id="audit">Run Audit</button>
+                </div>
+                <div class="grid" style="margin-top:16px;">
+                  <div class="stack">
+                    <label for="contact-email" class="muted small">Contact email</label>
+                    <input id="contact-email" type="email" placeholder="webmaster@example.com" value="webmaster@domain" />
+                  </div>
+                  <div class="stack">
+                    <label for="license-url" class="muted small">License URL</label>
+                    <input id="license-url" type="url" placeholder="https://example.com/license" value="https://creativecommons.org/licenses/by/4.0/" />
+                  </div>
+                </div>
+                <div class="grid" style="margin-top:16px;">
+                  <div class="stack">
+                    <label for="preferred-sources" class="muted small">Preferred sources</label>
+                    <textarea id="preferred-sources" rows="3" placeholder="https://example.com/about&#10;https://example.com/research"></textarea>
+                    <div class="muted small">One URL per line or comma separated.</div>
+                  </div>
+                  <div class="stack">
+                    <label for="apis" class="muted small">APIs</label>
+                    <textarea id="apis" rows="3" placeholder="https://api.example.com/v1/docs"></textarea>
+                    <div class="muted small">One endpoint per line or comma separated.</div>
+                  </div>
                 </div>
                 <div id="status" class="muted" style="margin-top:10px;"></div>
 
@@ -117,15 +217,24 @@ def create_app() -> Flask:
               const fmt = (v)=> v===null||v===undefined||v===""?"(missing)":v;
               const pill = (k,v)=>`<span class="pill">${k}: <b>${v}</b></span>`;
               const maxPagesInput = $("max-pages");
+              const contactInput = $("contact-email");
+              const licenseInput = $("license-url");
+              const preferredSourcesInput = $("preferred-sources");
+              const apisInput = $("apis");
               const pagesCard = $("pages-card");
               const pagesList = $("pages");
               const keywordsCard = $("keywords-card");
               const keywordsList = $("keywords");
               const orDefault = (value, fallback) => (value === undefined || value === null ? fallback : value);
+              const joinList = (values) => Array.isArray(values) ? values.join('\n') : '';
 
               async function runAudit() {
                 const url = $("url").value.trim();
                 const maxPages = Math.max(1, parseInt(maxPagesInput.value, 10) || 1);
+                const contactEmail = contactInput.value.trim();
+                const licenseUrl = licenseInput.value.trim();
+                const preferredSources = preferredSourcesInput.value;
+                const apis = apisInput.value;
                 if (!url) { $("status").textContent = "Please enter a URL"; return; }
                 $("status").textContent = `Auditing up to ${maxPages} page(s)…`;
                 $("audit").disabled = true;
@@ -137,10 +246,24 @@ def create_app() -> Flask:
                   const res = await fetch('/api/audit', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ url, max_pages: maxPages })
+                    body: JSON.stringify({
+                      url,
+                      max_pages: maxPages,
+                      contact_email: contactEmail,
+                      license_url: licenseUrl,
+                      preferred_sources: preferredSources,
+                      apis,
+                    })
                   });
                   if (!res.ok) throw new Error('Request failed');
                   const data = await res.json();
+                  if (data.llm_txt_options) {
+                    const opts = data.llm_txt_options;
+                    contactInput.value = opts.contact || '';
+                    licenseInput.value = opts.license_url || '';
+                    preferredSourcesInput.value = joinList(opts.preferred_sources);
+                    apisInput.value = joinList(opts.apis);
+                  }
                   // Score + breakdown
                   if (data.score === undefined || data.score === null) {
                     $("score").textContent = '—';
@@ -264,8 +387,20 @@ def create_app() -> Flask:
                 max_pages = int(payload.get("max_pages", 1))
             except (TypeError, ValueError):
                 max_pages = 1
+            max_pages = max(1, min(max_pages, 20))
+            contact_email = sanitize_contact(payload.get("contact_email"))
+            license_url = sanitize_license_url(payload.get("license_url"))
+            preferred_sources = sanitize_url_list(payload.get("preferred_sources"))
+            apis = sanitize_string_list(payload.get("apis"))
             site = audit_url(url, max_pages=max_pages)
-            llm_txt = generate_llm_txt(site.base_url, sitemaps=site.sitemaps)
+            llm_txt = generate_llm_txt(
+                site.base_url,
+                sitemaps=site.sitemaps,
+                contact=contact_email,
+                license_url=license_url,
+                preferred_sources=preferred_sources,
+                apis=apis,
+            )
             pages_payload = [
                 {
                     "url": p.url,
@@ -339,6 +474,12 @@ def create_app() -> Flask:
                 "llm_txt_url": site.llm_txt_url,
                 "sitemaps": site.sitemaps,
                 "llm_txt_draft": llm_txt,
+                "llm_txt_options": {
+                    "contact": contact_email,
+                    "license_url": license_url,
+                    "preferred_sources": preferred_sources,
+                    "apis": apis,
+                },
             }
             return jsonify(data)
         except Exception as e:
