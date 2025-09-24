@@ -3,6 +3,7 @@
 - Generates a draft `llm.txt` you can publish at `/.well-known/llm.txt`.
 - Produces a 0–100 score, a breakdown, and actionable recommendations.
 - Samples up to N internal pages and averages findings for a broader view.
+- Highlights likely LLM keywords with a quality score for each term.
 
 **Install**
 - Requires Python 3.9+.
@@ -36,6 +37,7 @@
 - Open `http://127.0.0.1:5173` or `http://localhost:8080` and enter a URL to audit.
 - Set the **Pages** input to sample additional internal URLs (results appear in the "Pages Audited" list).
 - The UI shows the averaged score/breakdown, per-page snapshots, recommendations, and a generated `llm.txt` ready to copy or download.
+- Review the "LLM Keyword Outlook" card to see which queries the page is best positioned to answer, alongside confidence scores and page coverage counts.
 
 **What It Checks**
 - Indexability: robots.txt and meta robots signals.
@@ -43,6 +45,7 @@
 - Structure: H1/H2/H3 usage and semantic HTML tags.
 - Structured Data: JSON-LD types (FAQPage, Article, etc.).
 - Content Depth: word count and Flesch reading ease.
+- LLM Keyword Outlook: top thematic keywords and their relative likelihood for surfacing in LLM answers.
 - LLM Policy: presence of `/.well-known/llm.txt` or `/llm.txt`.
 - Sitemaps: discovered via robots.txt.
 

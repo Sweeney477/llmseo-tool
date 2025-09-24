@@ -54,6 +54,17 @@ def main(argv=None):
                 "has_faq_schema": p.has_faq_schema,
                 "blocked_by_robots": p.blocked_by_robots,
                 "meta_robots": p.meta_robots,
+                "keywords": [
+                    {
+                        "term": kw.term,
+                        "score": kw.score,
+                        "frequency": kw.frequency,
+                        "in_title": kw.in_title,
+                        "in_headings": kw.in_headings,
+                        "in_description": kw.in_description,
+                    }
+                    for kw in p.keywords
+                ],
                 "recommendations": p.recommendations,
             }
             for p in site.pages
@@ -66,6 +77,14 @@ def main(argv=None):
                     "recommendations": site.recommendations,
                     "sampled_pages": len(site.pages),
                     "pages": pages_payload,
+                    "keywords": [
+                        {
+                            "term": kw.term,
+                            "score": kw.score,
+                            "pages": kw.pages,
+                        }
+                        for kw in site.keywords
+                    ],
                     "page": {
                         "url": site.page.url if site.page else None,
                         "status_code": site.page.status_code if site.page else None,
@@ -78,6 +97,17 @@ def main(argv=None):
                         "word_count": site.page.text_stats.get("word_count") if site.page else None,
                         "has_faq_schema": site.page.has_faq_schema if site.page else None,
                         "blocked_by_robots": site.page.blocked_by_robots if site.page else None,
+                        "keywords": [
+                            {
+                                "term": kw.term,
+                                "score": kw.score,
+                                "frequency": kw.frequency,
+                                "in_title": kw.in_title,
+                                "in_headings": kw.in_headings,
+                                "in_description": kw.in_description,
+                            }
+                            for kw in (site.page.keywords if site.page else [])
+                        ],
                     },
                     "llm_txt_found": site.llm_txt_found,
                     "llm_txt_url": site.llm_txt_url,
@@ -97,6 +127,11 @@ def main(argv=None):
         for k, v in site.breakdown.items():
             print(f"  - {k}: {v}")
 
+    if site.keywords:
+        print("\nLLM keyword outlook (top signals):")
+        for kw in site.keywords[:10]:
+            print(f"  - {kw.term}: {kw.score}/100 (seen on {kw.pages} page(s))")
+
     if total_pages:
         print(f"\nPages audited: {total_pages}")
         for idx, p in enumerate(site.pages, start=1):
@@ -111,6 +146,9 @@ def main(argv=None):
             print(f"  Flesch reading ease: {p.reading_ease:.1f}")
             print(f"  Has FAQ schema: {'yes' if p.has_faq_schema else 'no'}")
             print(f"  Robots blocked: {'yes' if p.blocked_by_robots else 'no'}")
+            if p.keywords:
+                top_terms = ", ".join(f"{kw.term} ({kw.score}/100)" for kw in p.keywords[:5])
+                print(f"  Keywords: {top_terms}")
 
     print(f"\nSitemap(s): {', '.join(site.sitemaps) if site.sitemaps else '(none found)'}")
     print(f"LLM policy present: {'yes' if site.llm_txt_found else 'no'}")

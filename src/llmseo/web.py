@@ -51,6 +51,10 @@ def create_app() -> Flask:
                 .page-card { border:1px solid #202328; border-radius:8px; padding:12px; background:#0f1114; }
                 .page-card .page-url { font-weight:600; word-break:break-word; margin:4px 0 8px 0; }
                 .page-meta { font-size:12px; color: var(--muted); margin-top:6px; }
+                .keywords { display:flex; flex-direction:column; gap:8px; margin-top:12px; }
+                .keyword-row { display:flex; justify-content:space-between; align-items:center; background:#0f1114; border:1px solid #202328; border-radius:8px; padding:10px 12px; }
+                .keyword-term { font-weight:600; }
+                .keyword-meta { font-size:12px; color: var(--muted); }
                 @media (max-width: 920px) { .grid { grid-template-columns: 1fr; } }
               </style>
             </head>
@@ -98,6 +102,11 @@ def create_app() -> Flask:
                   </div>
                 </div>
 
+                <div id="keywords-card" class="card" style="margin-top:16px; display:none;">
+                  <div class="muted small">LLM Keyword Outlook</div>
+                  <div id="keywords" class="keywords"></div>
+                </div>
+
                 <div id="pages-card" class="card" style="margin-top:16px; display:none;">
                   <div class="muted small">Pages Audited</div>
                   <div id="pages" class="pages"></div>
@@ -110,6 +119,8 @@ def create_app() -> Flask:
               const maxPagesInput = $("max-pages");
               const pagesCard = $("pages-card");
               const pagesList = $("pages");
+              const keywordsCard = $("keywords-card");
+              const keywordsList = $("keywords");
               const orDefault = (value, fallback) => (value === undefined || value === null ? fallback : value);
 
               async function runAudit() {
@@ -120,6 +131,8 @@ def create_app() -> Flask:
                 $("audit").disabled = true;
                 pagesCard.style.display = 'none';
                 pagesList.innerHTML = '';
+                keywordsCard.style.display = 'none';
+                keywordsList.innerHTML = '';
                 try {
                   const res = await fetch('/api/audit', {
                     method: 'POST',
@@ -159,6 +172,23 @@ def create_app() -> Flask:
                   $("facts").innerHTML = facts.map(([k,v])=>`<div class="muted">${k}</div><div>${v}</div>`).join('');
                   // llm.txt
                   $("llmtxt").textContent = data.llm_txt_draft || '# none';
+                  const keywordSummary = data.keywords || [];
+                  if (keywordSummary.length) {
+                    const rows = keywordSummary.map(kw => {
+                      const pages = kw.pages === 1 ? 'page' : 'pages';
+                      return `
+                        <div class="keyword-row">
+                          <div class="keyword-term">${kw.term}</div>
+                          <div class="keyword-meta">${kw.score}/100 · ${kw.pages} ${pages}</div>
+                        </div>
+                      `;
+                    }).join('');
+                    keywordsCard.style.display = 'block';
+                    keywordsList.innerHTML = rows;
+                  } else {
+                    keywordsCard.style.display = 'none';
+                    keywordsList.innerHTML = '';
+                  }
                   const pages = data.pages || [];
                   if (pages.length) {
                     const cards = pages.map((p, idx) => {
@@ -167,6 +197,8 @@ def create_app() -> Flask:
                       const words = orDefault(p.word_count, '—');
                       const reading = typeof p.reading_ease === 'number' ? p.reading_ease.toFixed(1) : '—';
                       const faq = p.has_faq_schema ? 'yes' : 'no';
+                      const pageKeywords = (p.keywords || []).slice(0, 3).map(kw => `<span class="pill">${kw.term} (${kw.score}/100)</span>`).join('');
+                      const keywordBlock = pageKeywords ? `<div class="flex small" style="margin-top:6px;">${pageKeywords}</div>` : '';
                       return `
                         <div class="page-card">
                           <div class="muted small">Page ${idx + 1}</div>
@@ -175,6 +207,7 @@ def create_app() -> Flask:
                             <span class="pill">score: ${score}</span>
                             <span class="pill">status: ${status}</span>
                           </div>
+                          ${keywordBlock}
                           <div class="page-meta">words: ${words} • reading ease: ${reading} • faq schema: ${faq}</div>
                         </div>
                       `;
@@ -249,6 +282,17 @@ def create_app() -> Flask:
                     "has_faq_schema": p.has_faq_schema,
                     "blocked_by_robots": p.blocked_by_robots,
                     "meta_robots": p.meta_robots,
+                    "keywords": [
+                        {
+                            "term": kw.term,
+                            "score": kw.score,
+                            "frequency": kw.frequency,
+                            "in_title": kw.in_title,
+                            "in_headings": kw.in_headings,
+                            "in_description": kw.in_description,
+                        }
+                        for kw in p.keywords
+                    ],
                     "recommendations": p.recommendations,
                 }
                 for p in site.pages
@@ -259,6 +303,14 @@ def create_app() -> Flask:
                 "recommendations": site.recommendations,
                 "sampled_pages": len(site.pages),
                 "pages": pages_payload,
+                "keywords": [
+                    {
+                        "term": kw.term,
+                        "score": kw.score,
+                        "pages": kw.pages,
+                    }
+                    for kw in site.keywords
+                ],
                 "page": {
                     "url": site.page.url if site.page else None,
                     "status_code": site.page.status_code if site.page else None,
@@ -271,6 +323,17 @@ def create_app() -> Flask:
                     "word_count": site.page.text_stats.get("word_count") if site.page else None,
                     "has_faq_schema": site.page.has_faq_schema if site.page else None,
                     "blocked_by_robots": site.page.blocked_by_robots if site.page else None,
+                    "keywords": [
+                        {
+                            "term": kw.term,
+                            "score": kw.score,
+                            "frequency": kw.frequency,
+                            "in_title": kw.in_title,
+                            "in_headings": kw.in_headings,
+                            "in_description": kw.in_description,
+                        }
+                        for kw in (site.page.keywords if site.page else [])
+                    ],
                 },
                 "llm_txt_found": site.llm_txt_found,
                 "llm_txt_url": site.llm_txt_url,

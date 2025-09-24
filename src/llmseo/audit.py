@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
@@ -22,6 +22,23 @@ from .utils import (
 
 
 @dataclass
+class KeywordInsight:
+    term: str
+    score: float
+    frequency: int
+    in_title: bool
+    in_headings: bool
+    in_description: bool
+
+
+@dataclass
+class KeywordSummary:
+    term: str
+    score: float
+    pages: int
+
+
+@dataclass
 class PageAudit:
     url: str
     status_code: int
@@ -38,6 +55,7 @@ class PageAudit:
     meta_robots: Optional[str]
     blocked_by_robots: bool
     semantic_tags_present: List[str]
+    keywords: List[KeywordInsight] = field(default_factory=list)
     score: float = 0.0
     breakdown: Dict[str, float] = field(default_factory=dict)
     recommendations: List[str] = field(default_factory=list)
@@ -56,6 +74,7 @@ class SiteAudit:
     score: float = 0.0
     breakdown: Dict[str, float] = field(default_factory=dict)
     recommendations: List[str] = field(default_factory=list)
+    keywords: List[KeywordSummary] = field(default_factory=list)
 
 
 UA = "llmseo-tool/0.1 (+https://example.com)"
@@ -86,6 +105,86 @@ NON_HTML_EXTENSIONS = {
     ".avi",
 }
 MAX_LINKS_PER_PAGE = 50
+STOPWORDS = {
+    "the",
+    "that",
+    "with",
+    "this",
+    "from",
+    "have",
+    "your",
+    "about",
+    "their",
+    "there",
+    "will",
+    "would",
+    "could",
+    "should",
+    "into",
+    "while",
+    "where",
+    "these",
+    "those",
+    "what",
+    "when",
+    "which",
+    "were",
+    "been",
+    "them",
+    "they",
+    "also",
+    "than",
+    "then",
+    "over",
+    "such",
+    "only",
+    "some",
+    "more",
+    "most",
+    "many",
+    "each",
+    "other",
+    "into",
+    "your",
+    "ours",
+    "ourselves",
+    "yours",
+    "itself",
+    "it",
+    "here",
+    "make",
+    "made",
+    "just",
+    "very",
+    "much",
+    "like",
+    "have",
+    "been",
+    "does",
+    "doesn",
+    "again",
+    "even",
+    "through",
+    "within",
+    "across",
+    "because",
+    "after",
+    "before",
+    "under",
+    "above",
+    "upon",
+    "once",
+    "every",
+    "being",
+    "same",
+    "such",
+    "another",
+    "including",
+    "include",
+    "between",
+    "might",
+    "shall",
+}
 
 
 def fetch(url: str, timeout: int = 15) -> Tuple[int, str, Dict[str, str]]:
@@ -165,6 +264,76 @@ def detect_semantic_tags(html: str) -> List[str]:
         if re.search(fr"<\s*{t}(\s|>)", html, flags=re.I):
             present.append(t)
     return present
+
+
+def tokenize_for_keywords(text: Optional[str]) -> List[str]:
+    if not text:
+        return []
+    tokens = re.findall(r"[A-Za-z']+", text.lower())
+    return [t for t in tokens if len(t) > 3 and t not in STOPWORDS]
+
+
+def extract_keywords(
+    body_text: str,
+    title: Optional[str],
+    headings: Dict[str, List[str]],
+    description: Optional[str],
+    max_keywords: int = 10,
+) -> List[KeywordInsight]:
+    tokens = tokenize_for_keywords(body_text)
+    if not tokens:
+        return []
+
+    frequencies = Counter(tokens)
+    max_freq = max(frequencies.values()) if frequencies else 0
+
+    title_tokens = set(tokenize_for_keywords(title))
+    desc_tokens = set(tokenize_for_keywords(description))
+
+    h1_tokens: Set[str] = set()
+    h2_tokens: Set[str] = set()
+    h3_tokens: Set[str] = set()
+    for h in headings.get("h1", []):
+        h1_tokens.update(tokenize_for_keywords(h))
+    for h in headings.get("h2", []):
+        h2_tokens.update(tokenize_for_keywords(h))
+    for h in headings.get("h3", []):
+        h3_tokens.update(tokenize_for_keywords(h))
+
+    insights: List[KeywordInsight] = []
+    for term, freq in frequencies.items():
+        base = (freq / max_freq) if max_freq else 0.0
+        score = base * 60.0
+        in_title = term in title_tokens
+        in_h1 = term in h1_tokens
+        in_h2 = term in h2_tokens
+        in_h3 = term in h3_tokens
+        in_description = term in desc_tokens
+
+        if in_title:
+            score += 25.0
+        if in_h1:
+            score += 15.0
+        if in_h2:
+            score += 10.0
+        if in_h3:
+            score += 5.0
+        if in_description:
+            score += 5.0
+
+        insights.append(
+            KeywordInsight(
+                term=term,
+                score=round(clamp(score, 0.0, 100.0), 1),
+                frequency=freq,
+                in_title=in_title,
+                in_headings=in_h1 or in_h2 or in_h3,
+                in_description=in_description,
+            )
+        )
+
+    insights.sort(key=lambda k: (k.score, k.frequency), reverse=True)
+    return insights[:max_keywords]
 
 
 def parse_robots(robots_txt: str) -> Dict[str, List[str]]:
@@ -347,6 +516,23 @@ def derive_recommendations(site: SiteAudit) -> None:
     site.recommendations = combined
 
 
+def aggregate_keywords(site: SiteAudit, max_terms: int = 12) -> List[KeywordSummary]:
+    buckets: Dict[str, List[float]] = {}
+    for page in site.pages:
+        for kw in page.keywords:
+            buckets.setdefault(kw.term, []).append(kw.score)
+
+    summaries: List[KeywordSummary] = []
+    for term, scores in buckets.items():
+        if not scores:
+            continue
+        avg = sum(scores) / len(scores)
+        summaries.append(KeywordSummary(term=term, score=round(avg, 1), pages=len(scores)))
+
+    summaries.sort(key=lambda s: (s.score, s.pages), reverse=True)
+    return summaries[:max_terms]
+
+
 def _should_follow(link: str) -> bool:
     parsed = urlparse(link)
     if parsed.scheme not in {"http", "https"}:
@@ -432,6 +618,12 @@ def audit_url(url: str, max_pages: int = 1) -> SiteAudit:
         meta_robots = metas.get("name:robots")
         semantic_tags_present = detect_semantic_tags(html)
         blocked = check_blocked(disallow_paths, current) if disallow_paths else False
+        keywords = extract_keywords(
+            text,
+            title=title,
+            headings=headings,
+            description=description,
+        )
 
         page = PageAudit(
             url=current,
@@ -449,6 +641,7 @@ def audit_url(url: str, max_pages: int = 1) -> SiteAudit:
             meta_robots=meta_robots,
             blocked_by_robots=blocked,
             semantic_tags_present=semantic_tags_present,
+            keywords=keywords,
         )
         site.pages.append(page)
 
@@ -468,5 +661,6 @@ def audit_url(url: str, max_pages: int = 1) -> SiteAudit:
                 queue.append(clean)
 
     score_site(site)
+    site.keywords = aggregate_keywords(site)
     derive_recommendations(site)
     return site
