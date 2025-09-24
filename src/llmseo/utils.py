@@ -2,15 +2,36 @@ from __future__ import annotations
 
 import re
 from typing import List
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, urlsplit, urlunsplit
+
+
+_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
 
 
 def normalize_url(url: str) -> str:
-    parsed = urlparse(url)
-    scheme = parsed.scheme or "https"
-    netloc = parsed.netloc or parsed.path
-    path = parsed.path if parsed.netloc else ""
-    return f"{scheme}://{netloc}{path or '/'}"
+    url = (url or "").strip()
+    if not url:
+        raise ValueError("URL cannot be empty")
+
+    if url.startswith("//"):
+        url = "https:" + url
+    elif not _SCHEME_RE.match(url):
+        url = "https://" + url.lstrip("/")
+
+    parts = urlsplit(url)
+    scheme = parts.scheme or "https"
+    netloc = parts.netloc
+    path = parts.path
+
+    if not netloc and parts.path:
+        netloc = parts.path
+        path = ""
+
+    if not netloc:
+        raise ValueError(f"URL must include a host: {url!r}")
+
+    path = path or "/"
+    return urlunsplit((scheme, netloc, path, parts.query, parts.fragment))
 
 
 def is_same_origin(base: str, other: str) -> bool:
